@@ -155,6 +155,9 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
             generator.begin_stream(input_ids, settings)
             
             tokens_generated = 0
+            start_time = time.time()
+            print("\nStarted Inference\n", end="", flush=True)
+            
             while True:
                 
                 chunk, eos, _ = generator.stream()
@@ -168,11 +171,16 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                     }
                     yield f"data: {json.dumps(payload)}\n\n"
                 tokens_generated +=1
+                print(f"\rTokens generated: {tokens_generated}", end="", flush=True)
                 
                 if eos or tokens_generated>=req.max_tokens:
-                    print(f"generated {tokens_generated} tokens")
                     break
-                                    
+                
+            elapsed_time = time.time() - start_time
+            tps = tokens_generated/elapsed_time if elapsed_time>= 0 else 0
+            print(f"\ngenerated {tokens_generated} tokens. tps = {tps}")                       
+        
+        
         #OoM
         except torch.cuda.OutOfMemoryError:
             #free memory

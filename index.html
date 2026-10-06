@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="eng">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atlas - Local LLM Chat</title>
+    <style> 
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+        h2 { color: #569cd6; }
+        #chat-box {
+            background-color: #252526;
+            border: 1px solid #3c3c3c;
+            border-radius: 8px;
+            height: 400px;
+            overflow-y: auto;
+            padding: 15px;
+            margin-bottom: 20px;
+            white-space: pre-wrap;
+            line-height: 1.5;
+        }
+        .input-group {
+            display: flex;
+            gap: 10px;
+        }
+        textarea {
+            flex: 1;
+            background-color: #3c3c3c;
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 6px;
+            padding: 12px;
+            resize: none;
+            height: 50px;
+            font-family: inherit;
+        }
+        button {
+            background-color: #0e639c;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            padding: 0 20px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background-color: #1177bb; }
+        button:disabled { background-color: #444; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <h2>Atlas LLM (Qwen 2.5)</h2>
+    <div id="chat-box"></div>
+
+    <div class="input-group">
+        <textarea id="prompt-input" placeholder="Your message..."></textarea>
+        <button id="send-btn" onclick="sendPrompt()">Send</button>
+    </div>
+
+    <script>
+        async function sendPrompt() {
+            const promptInput = document.getElementById('prompt-input');
+            const chatBox = document.getElementById('chat-box');
+            const sendBtn = disAbled = document.getElementById('send-btn');
+            
+            const prompt = promptInput.value.trim();
+            if (!prompt) return;
+
+            //user message
+            chatBox.innerHTML += `\n\n<b>You:</b> ${prompt}\n<b>Atlas:</b> `;
+            promptInput.value = '';
+            sendBtn.disabled = true;
+            chatBox.scrollTop = chatBox.scrollHeight;
+
+            try {
+                // endpoint api call
+                const response = await fetch('http://127.0.0.1:8000/v1/chat/completions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    //settings
+                    body: JSON.stringify({
+                        messages: [
+                            { role: "system", content: "You are a locally run chatbot. for all sakes your name is Atlas" },
+                            { role: "user", content: prompt }
+                        ],
+                        max_tokens: 5000,
+                        temperature: 0.4,
+                        stream: true
+                    })
+                });
+
+                if (!response.ok) throw new Error("Server connection error.");
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = "";
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    
+                    
+                    buffer = lines.pop(); 
+
+                    for (const line of lines) {
+                        const trimmed = line.trim();
+                        if (!trimmed.startsWith('data:')) continue;
+                        
+                        const dataStr = trimmed.replace('data:', '').trim();
+                        if (dataStr === '[DONE]') break;
+
+                        try {
+                            const json = JSON.parse(dataStr);
+                            const content = json.choices?.[0]?.delta?.content;
+                            if (content) {
+                                // write chunks
+                                chatBox.innerHTML += content;
+                                chatBox.scrollTop = chatBox.scrollHeight;
+                            }
+                        } catch (e) {
+                            // ignore empty chunks
+                        }
+                    }
+                }
+            } catch (err) {
+                chatBox.innerHTML += `\n[Errore: ${err.message}]`;
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
