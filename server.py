@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from exllamav2 import ExLlamaV2, ExLlamaV2Cache, ExLlamaV2Config, ExLlamaV2Tokenizer
-from exllamav2.generator import ExLlamaV2DynamicGenerator
+from exllamav2.generator import ExLlamaV2StreamingGenerator, ExLlamaV2Sampler
 from dotenv import load_dotenv
 
 import time
@@ -40,17 +40,23 @@ async def lifespan(app: FastAPI):
     try:
         
         config = ExLlamaV2Config(MODEL_DIR) #loads model's config
+        config.prepare()
         config.max_seq_len = MAX_CONTEXT #sets max context
         
         #malloc for model
         model = ExLlamaV2(config)
+        
         #lazy cache (sequential, to avoid fragmentaion errors)
         cache = ExLlamaV2Cache(model, max_seq_len=MAX_CONTEXT, lazy=True)
-        #loads weights on VRAM
-        model.load_autosplit(cache) 
         
-        tokenizer = ExLlamaV2Tokenizer(MODEL_DIR)
-        generator = ExLlamaV2DynamicGenerator(model, cache, tokenizer)
+        #loads weights on VRAM
+        def progress_callback(step, tot):
+            print(f"\rLoading Weights... (Layer {step} of {tot})", end="", flush=True)
+        model.load_autosplit(cache, callback=progress_callback) 
+        print("\n")
+        
+        tokenizer = ExLlamaV2Tokenizer(config)
+        generator = ExLlamaV2StreamingGenerator(model, cache, tokenizer)
         
         #makes dict.
         state["generator"] = generator
@@ -128,9 +134,11 @@ def build_chatML_prompt(messages: List[Message]) -> str:
 
 #inference endopoint (only local for now see cors settings). post only
 @app.post("/v1/chat/completions")
-async def chat_endpoint(req: ChatCompletionRequest): #req structure devlared before
+async def chat_endpoint(req: ChatCompletionRequest): #req structure declared before in the state dict
     generator = state.get("generator")
-    if not generator:
+    tokenizer = state.get("tokenizer")
+    
+    if not generator or not tokenizer:
         raise HTTPException(status_code=503, detail="Model not ready/loaded unsuccesfully.")
 
     formatted_prompt = build_chatML_prompt(req.messages) #format before putting it into the model
@@ -139,21 +147,32 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure devlared bef
         
         try:
             
-            #use ExLlamaV2 ExLlamaV2DynamicGenerator.generate_text syncronously
-            for chunk in generator.generate_text(
-                prompt=formatted_prompt,
-                max_new_tokens=req.max_tokens, #hard limit on max tokens (comes from JSON injest or default settings.)
-                stream=True #returns to pyhton after each token (token streaming, it gets formattesd to payload and posted)
-            ):
-                #formats payload for post (def OpenAI format)
-                payload = {
-                    "choices": [{
-                        "delta": {"content": chunk},
-                        "finish_reason": None
-                    }]
-                }
-                yield f"data: {json.dumps(payload)}\n\n" #returns payload currently generated
-        
+            settings = ExLlamaV2Sampler.Settings()
+            settings.temperature = req.temperature
+            
+            input_ids = tokenizer.encode(formatted_prompt)
+            
+            generator.begin_stream(input_ids, settings)
+            
+            tokens_generated = 0
+            while True:
+                
+                chunk, eos, _ = generator.stream()
+                
+                if chunk:
+                    payload = {
+                        "choices": [{
+                            "delta": {"content": chunk},
+                            "finish_reason": None
+                        }]
+                    }
+                    yield f"data: {json.dumps(payload)}\n\n"
+                tokens_generated +=1
+                
+                if eos or tokens_generated>=req.max_tokens:
+                    print(f"generated {tokens_generated} tokens")
+                    break
+                                    
         #OoM
         except torch.cuda.OutOfMemoryError:
             #free memory
