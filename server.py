@@ -1,14 +1,16 @@
 from contextlib import asynccontextmanager
 from typing import List, Literal, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from exllamav2 import ExLlamaV2, ExLlamaV2Cache, ExLlamaV2Config, ExLlamaV2Tokenizer
 from exllamav2.generator import ExLlamaV2DynamicGenerator
 from dotenv import load_dotenv
 
 import time
+import torch
 import os
 import json
 
@@ -28,29 +30,46 @@ state = {} # dynamic global dict. (persist on verious HTTPS req.)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     
+    if not MODEL_DIR or not os.path.exists(MODEL_DIR):
+        print(f"model directory invalid or missing : {MODEL_DIR}")
+        yield #fails health check
+        return
     #loading model onto ExLlamaV2
     print(f"Loading model from : {MODEL_DIR}...")
-    config = ExLlamaV2Config(MODEL_DIR) #loads model's config
-    config.max_seq_len = MAX_CONTEXT #sets max context
     
-    #malloc for model
-    model = ExLlamaV2(config)
-    #lazy cache (sequential, to avoid fragmentaion errors)
-    cache = ExLlamaV2Cache(model, max_seq_len=MAX_CONTEXT, lazy=True)
-    #loads weights on VRAM
-    model.load_autosplit(cache) 
+    try:
+        
+        config = ExLlamaV2Config(MODEL_DIR) #loads model's config
+        config.max_seq_len = MAX_CONTEXT #sets max context
+        
+        #malloc for model
+        model = ExLlamaV2(config)
+        #lazy cache (sequential, to avoid fragmentaion errors)
+        cache = ExLlamaV2Cache(model, max_seq_len=MAX_CONTEXT, lazy=True)
+        #loads weights on VRAM
+        model.load_autosplit(cache) 
+        
+        tokenizer = ExLlamaV2Tokenizer(MODEL_DIR)
+        generator = ExLlamaV2DynamicGenerator(model, cache, tokenizer)
+        
+        #makes dict.
+        state["generator"] = generator
+        state["tokenizer"] = tokenizer
+        print("Model loaded on VRAM succesfully.")
     
+    except torch.cuda.OutOfMemoryError:
+        print(f"VRAM OoM during loading. Try lowering {MAX_CONTEXT}")
+        #free corrupted malloc(s)
+        torch.cuda.empty_cache() 
     
-    tokenizer = ExLlamaV2Tokenizer(MODEL_DIR)
-    generator = ExLlamaV2DynamicGenerator(model, cache, tokenizer)
+    except Exception as e:
+        print(f"Failed to load model. -> {str(e)}")
     
-    state["generator"] = generator
-    state["tokenizer"] = tokenizer
-    print("Model loaded on VRAM succesfully.")
-    yield #loading completed
+    yield #loading completed (succesfully)
     
-    #free() state (in wich the model was loaded in) when apllication shuts down
+    #free() state (in wich the model was loaded in) when apllication shuts down, also free empty cache
     state.clear()
+    torch.cuda.empty_cache()
 
 
 app = FastAPI(title="Local LLM Engine", lifespan=lifespan)
@@ -64,6 +83,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=400, #bad req (formatting)
+        content={
+            "error": {
+                "message": "Invalid JSON payload or missing required fields.",
+                "type": "invalid_request_error",
+                "details": exc.errors()
+            }
+        },
+    )
 #---
 #JSON ingest structure / defualt OpenAI structure
 #---
@@ -106,23 +137,41 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure devlared bef
 
     def event_stream():
         
-        #use ExLlamaV2 ExLlamaV2DynamicGenerator.generate_text syncronously
-        for chunk in generator.generate_text(
-            prompt=formatted_prompt,
-            max_new_tokens=req.max_tokens, #hard limit on max tokens (comes from JSON injest or default settings.)
-            stream=True #returns to pyhton after each token (token streaming, it gets formattesd to payload and posted)
-        ):
-            #formats payload for post (def OpenAI format)
-            payload = {
-                "choices": [{
-                    "delta": {"content": chunk},
-                    "finish_reason": None
-                }]
-            }
-            yield f"data: {json.dumps(payload)}\n\n" #returns payload currently generated
+        try:
+            
+            #use ExLlamaV2 ExLlamaV2DynamicGenerator.generate_text syncronously
+            for chunk in generator.generate_text(
+                prompt=formatted_prompt,
+                max_new_tokens=req.max_tokens, #hard limit on max tokens (comes from JSON injest or default settings.)
+                stream=True #returns to pyhton after each token (token streaming, it gets formattesd to payload and posted)
+            ):
+                #formats payload for post (def OpenAI format)
+                payload = {
+                    "choices": [{
+                        "delta": {"content": chunk},
+                        "finish_reason": None
+                    }]
+                }
+                yield f"data: {json.dumps(payload)}\n\n" #returns payload currently generated
         
-        # Exits when STOP token
-        yield "data: [DONE]\n\n"
+        #OoM
+        except torch.cuda.OutOfMemoryError:
+            #free memory
+            torch.cuda.empty_cache()
+            error_payload = {
+                "error": "VRAM OoM. Conversation context exeeded avalable memory."
+            }
+            yield f"data: {json.dumps(error_payload)}\n\n"   
+        #general error  
+        except Exception as e:
+            error_payload = {
+                "error": f"Internal inference error -> {str(e)}"
+            }
+            yield f"data: {json.dumps(error_payload)}\n\n"
+        #close the stream
+        finally:
+            # Exits when STOP token
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
