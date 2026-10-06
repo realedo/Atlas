@@ -82,20 +82,29 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
 
     #get the last user's message
     last_user_message = next((msg.content for msg in reversed(req.messages) if msg.role == "user"), "")
+           
+    modified_messages = list(req.messages)
     
-    web_context = ""
-    if WEB_TOGGLE:
-        
-        print(f"[Web Search] -- Searching the web for : '{last_user_message}'")
+    web_context=""
+    if WEB_TOGGLE and last_user_message.strip():
+        web_start_time = time.time()
+        print(f"Searching for {last_user_message}\n")
         web_context = web_search(last_user_message)
-        
-        
-    moddified_messages = list(req.messages)
-    if web_context: #append web seaches if they are succesfull and toggled
-        moddified_messages.insert(0, Message(role="system", content=f"Use the following informations coming from web search if needed:\n{web_context}"))
+        print(f"Searched for {time.time()- web_start_time} seconds\n")
     
+    if web_context and not web_context.startswith(("Web search initialization failed:", "Web search is disabled")):
+        #add web search
+        modified_messages.insert(0,
+                                 Message(
+                                     role="system",
+                                     content=("You have access to the following web search results. Use them when they are relevant to the user's question."
+                                              "Prioritize the supplied sources for current or time-sensitive facts, but do not assume every result is accurate."
+                                              "Do not invent facts or claim that a source supports something it does not. If the results are insufficient, say so."
+                                              "Cite relevant sources if you deem necessary using their supplied URLs.\n\n" f"{web_context}")
+                                 )
+                                )
 
-    formatted_prompt = build_chatML_prompt(req.messages) #format before putting it into the model
+    formatted_prompt = build_chatML_prompt(modified_messages) #format before putting it into the model
 
     def event_stream():
         
