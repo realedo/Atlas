@@ -177,4 +177,4 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure devlared bef
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "gpu_ready": "generator" in state}
+    return {"status": "ok", "gpu_ready": "generator" in state} #fails if generator is yielded as empty (expetion as e)
