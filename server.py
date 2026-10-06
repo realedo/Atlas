@@ -16,6 +16,8 @@ import json
 #----env varaibles/secrets
 load_dotenv()
 MODEL_DIR = os.environ.get("dir_model")
+default_temp = 0.7
+default_max_tok_out = 1024
 #----
 #---- model settings ---
 MAX_CONTEXT = 4096 #trial and error for my gpu
@@ -61,3 +63,69 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+#---
+#JSON ingest structure / defualt OpenAI structure
+#---
+class Message(BaseModel):  #role + message
+    role: Literal["system", "user", "assistant"]
+    #the actual message
+    content: str
+
+class ChatCompletionRequest(BaseModel): #completions
+    messages: List[Message]
+    
+    #settings that can be forwarded in the request. other wise default settings.
+    max_tokens: Optional[int] = default_max_tok_out
+    temperature: Optional[float] = default_temp
+    
+    stream: Optional[bool] = True
+
+
+#fromatting JSON input into allowed format for the model (chatML)-->(https://web.archive.org/web/20230303120844/https://github.com/openai/openai-python/blob/main/chatml.md) (https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/tokenizer_config.json)
+def build_chatML_prompt(messages: List[Message]) -> str:
+   
+    prompt = "" #blank promptm, append as you go
+    for msg in messages:
+       
+        prompt += f"<|im_start|>{msg.role}\n{msg.content}<|im_end|>\n"
+        
+    prompt += "<|im_start|>assistant\n"
+    return prompt
+
+
+
+#inference endopoint (only local for now see cors settings). post only
+@app.post("/v1/chat/completions")
+async def chat_endpoint(req: ChatCompletionRequest): #req structure devlared before
+    generator = state.get("generator")
+    if not generator:
+        raise HTTPException(status_code=503, detail="Model not ready/loaded unsuccesfully.")
+
+    formatted_prompt = build_chatML_prompt(req.messages) #format before putting it into the model
+
+    def event_stream():
+        
+        #use ExLlamaV2 ExLlamaV2DynamicGenerator.generate_text syncronously
+        for chunk in generator.generate_text(
+            prompt=formatted_prompt,
+            max_new_tokens=req.max_tokens, #hard limit on max tokens (comes from JSON injest or default settings.)
+            stream=True #returns to pyhton after each token (token streaming, it gets formattesd to payload and posted)
+        ):
+            #formats payload for post (def OpenAI format)
+            payload = {
+                "choices": [{
+                    "delta": {"content": chunk},
+                    "finish_reason": None
+                }]
+            }
+            yield f"data: {json.dumps(payload)}\n\n" #returns payload currently generated
+        
+        # Exits when STOP token
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "gpu_ready": "generator" in state}
