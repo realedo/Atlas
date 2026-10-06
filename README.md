@@ -1,0 +1,2 @@
+# Atlas
+Local inference infrastructure
