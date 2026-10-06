@@ -1,2 +1,2 @@
 # Atlas
-Local inference infrastructure
+Local inference backend infrastructure
