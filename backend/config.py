@@ -19,4 +19,5 @@ append_links = False
 append_images = False
 max_url_scrape_len = 4000
 query_transform_temperature = 0.1
+query_transform_max_tokens = 15
 #----#

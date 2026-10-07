@@ -25,10 +25,6 @@ def search_url(url: str, max_len: int =max_url_scrape_len) -> str:
             
 
 
-
-
-
-
 def web_search(query: str, max_res: int = MX_RES) -> str:
 
     if not WEB_TOGGLE:
@@ -40,21 +36,12 @@ def web_search(query: str, max_res: int = MX_RES) -> str:
 
     #max_res = max(1, min(int(max_res), 10))
     sections = []
-    
-    #cheks if theres any urls in the prompt
-    urls_present = url_pattern.findall(query)
-    if urls_present:
-        url_to_search = urls_present[0]
-        sections.append(f"Content from the searched URL ({url_to_search}): \n" + search_url(url_to_search))
-        return f"Searched the URL given in the prompt: {query}\n\n" + "\n\n".join(sections)
-    
-    #if no direct links try this instead
     try:
         ddgs = DDGS()
 
 
         try:
-            #searches the actual prompt here(ddg search). might need to inference the prompt to give out a better query, seems costly in execute time but might give out better context.
+            #searches the actual prompt here(ddg search).
             results = list(
                 ddgs.text(query, max_results=max_res) or []
             )

@@ -7,15 +7,22 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from exllamav2.generator import ExLlamaV2Sampler
 #
-from ddgs import DDGS
 import time
 import torch
 import json
+import re
 #
 from model_loader import load_ai_model, clear_ai_model, state
 from config import default_max_tok_out, default_temp, WEB_TOGGLE
 from prompt_formatter import Message, build_chatML_prompt
-from web_search import web_search
+from web_search import web_search, search_url
+from query_optimizer import gen_optimized_query_to_search
+
+
+
+url_pattern = re.compile(r'(https?://[^\s]+)')
+
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -87,7 +94,24 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
     
     web_context=""
     if WEB_TOGGLE and last_user_message.strip():
+        print("Starting web search...\n")
         web_start_time = time.time()
+        
+        #checks if theres URLs in the prompt:
+        urls_present = url_pattern.findall(last_user_message)
+        if urls_present:
+            url_to_search = urls_present[0]
+            print(f"Url ({url_to_search}) found in prompt, procede to scrape from said url...\n")
+            web_context = search_url(url_to_search)
+        
+        else:
+            print(f"No direct URLs found in prompt. generating a optimized search query...\n")
+            optimized_search_query = gen_optimized_query_to_search(generator, tokenizer, last_user_message)     
+            print(f"Done generating optimised query")
+            print(f"Searching for {optimized_search_query}\n")
+            web_context = web_search(optimized_search_query)      
+        
+        
         print(f"Searching for {last_user_message}\n")
         web_context = web_search(last_user_message)
         print(f"Searched for {time.time()- web_start_time} seconds\n")
@@ -100,7 +124,7 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                                      content=("You have access to the following web search results. Use them when they are relevant to the user's question."
                                               "Prioritize the supplied sources for current or time-sensitive facts, but do not assume every result is accurate."
                                               "Do not invent facts or claim that a source supports something it does not. If the results are insufficient, say so."
-                                              "Cite relevant sources if you deem necessary using their supplied URLs.\n\n" f"{web_context}")
+                                              "Cite relevant sources if you absolutly deem necessary to, using their supplied URLs.\n\n" f"{web_context}")
                                  )
                                 )
 
@@ -125,6 +149,7 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                 
                 chunk, eos, _ = generator.stream()
                 
+                #serves chunks and not tokens not to cut off special char that woudl be otherwise lost
                 if chunk:
                     payload = {
                         "choices": [{
