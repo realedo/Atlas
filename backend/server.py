@@ -13,7 +13,7 @@ import json
 import re
 #
 from model_loader import load_ai_model, clear_ai_model, state
-from config import default_max_tok_out, default_temp, WEB_TOGGLE
+from config import default_max_tok_out, default_temp, WEB_TOGGLE, MAX_CONTEXT, min_free_tokens_for_inf, max_url_scrape_len
 from prompt_formatter import Message, build_chatML_prompt
 from web_search import web_search, search_url
 from query_optimizer import gen_optimized_query_to_search
@@ -108,12 +108,10 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
             print(f"No direct URLs found in prompt. generating a optimized search query...\n")
             optimized_search_query = gen_optimized_query_to_search(generator, tokenizer, last_user_message)     
             print(f"Done generating optimised query")
-            print(f"Searching for {optimized_search_query}\n")
+            print(f"Searching for : ({optimized_search_query})\n")
             web_context = web_search(optimized_search_query)      
         
         
-        print(f"Searching for {last_user_message}\n")
-        web_context = web_search(last_user_message)
         print(f"Searched for {time.time()- web_start_time} seconds\n")
     
     if web_context and not web_context.startswith(("Web search initialization failed:", "Web search is disabled")):
@@ -124,6 +122,7 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                                      content=("You have access to the following web search results. Use them when they are relevant to the user's question."
                                               "Prioritize the supplied sources for current or time-sensitive facts, but do not assume every result is accurate."
                                               "Do not invent facts or claim that a source supports something it does not. If the results are insufficient, say so."
+                                              "Always provide extensive, highly detailed, and comprehensive answers. Never give brief or single-sentence responses."
                                               "Cite relevant sources if you absolutly deem necessary to, using their supplied URLs.\n\n" f"{web_context}")
                                  )
                                 )
@@ -134,10 +133,21 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
         
         try:
             
+            #fetch base settings from V2Sampler + add custom temperature
             settings = ExLlamaV2Sampler.Settings()
             settings.temperature = req.temperature
             
+            #encode prompt
             input_ids = tokenizer.encode(formatted_prompt)
+            
+            # !! check if the prompt is not out of bound of max context lenght allowed !! #
+            prompt_len = input_ids.shape[-1]
+            #check how much space is left 
+            available_space_for_prompt = MAX_CONTEXT - prompt_len
+            if available_space_for_prompt < min_free_tokens_for_inf:
+                error_payload = f"Context is too big... using {prompt_len} out of {MAX_CONTEXT}. Allocate more space, lower minimum token required to start inference ({min_free_tokens_for_inf}), or check if web search context is taking to much space (current scrape per search: {max_url_scrape_len})\n"
+                print(f"[Warning] : {error_payload}")           
+            
             
             generator.begin_stream(input_ids, settings)
             

@@ -1,7 +1,7 @@
 import re
 import trafilatura
 from ddgs import DDGS
-from config import MX_RES, WEB_TOGGLE, append_links, append_images, max_url_scrape_len
+from config import MX_RES, WEB_TOGGLE, append_links, append_images, max_url_scrape_len, mx_trafilatura_per_prompt
 
 
 url_pattern = re.compile(r'(https?://[^\s]+)')
@@ -55,14 +55,23 @@ def web_search(query: str, max_res: int = MX_RES) -> str:
                         f"   URL: {result.get('href', 'No URL available')}"
                     )
                     
-                #use trafilatura.extract on the first page hitted
-                fist_url = results[0].get('href')
-                if fist_url:
-                    lines.append("\nData from the first page hitted: \n") 
-                    print(f"attempting to extarct data from first result\n")
-                    lines.append(search_url(fist_url))
-                    
-                #join ddgs and context from trafialtura on the first href
+
+
+                i = mx_trafilatura_per_prompt
+                if i > max_res:
+                    print(f"[Warning] Attempring to get data from more href than the href scraped, check config!")
+                    i = max_res
+                j = 0
+                while j<i:  #start at index 0 so no <=
+                    url_to_search_ddgs = results[j].get('href')
+                    if url_to_search_ddgs:
+                        lines.append("\nData from the first page hitted: \n") 
+                        print(f"Attempting to extarct data from result {j+1} \n")
+                        lines.append(search_url(url_to_search_ddgs))
+                        j += 1 #increses count
+                        
+                                                
+                #join ddgs and context from trafialtura on the first mx_traf... href
                 sections.append("\n".join(lines))
         
         except Exception as e:

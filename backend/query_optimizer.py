@@ -2,6 +2,9 @@ from exllamav2.generator import ExLlamaV2Sampler
 from config import query_transform_temperature, query_transform_max_tokens
 import torch
 import json
+import datetime
+
+now = datetime.datetime.now().strftime("%A, %B %d, %Y")
 
 def gen_optimized_query_to_search(generator, tokenizer, user_msg: str) -> str:
     
@@ -9,7 +12,9 @@ def gen_optimized_query_to_search(generator, tokenizer, user_msg: str) -> str:
     sys_section=(
         "You are a model whose whole use case is taking the user prompt and generate a web search query\n"
         "Exctract 2/4 keywords from the user prompt and output a small quaery containing that will be used in a search engine\n"
+        f"If you think its time sensitive, use datetime provided here: {now}"
         "Avoid any useless punctuation, special charachters if no needed. focus heavily on the keyword to compose the query.\n"
+        
     )
     
     prompt = f"<|im_start|>system\n{sys_section}<|im_end|>\n<|im_start|>user\n{user_msg}<|im_end|>\n<|im_start|>assistant\n"
