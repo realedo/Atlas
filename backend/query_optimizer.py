@@ -4,9 +4,12 @@ import torch
 import json
 import datetime
 
-now = datetime.datetime.now().strftime("%A, %B %d, %Y")
 
 def gen_optimized_query_to_search(generator, tokenizer, user_msg: str) -> str:
+    
+    
+    now = datetime.datetime.now().strftime("%A, %B %d, %Y")
+    
     
     #will set role as system and this as its scope
     sys_section=(

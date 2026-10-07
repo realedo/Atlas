@@ -146,14 +146,17 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
             available_space_for_prompt = MAX_CONTEXT - prompt_len
             if available_space_for_prompt < min_free_tokens_for_inf:
                 error_payload = f"Context is too big... using {prompt_len} out of {MAX_CONTEXT}. Allocate more space, lower minimum token required to start inference ({min_free_tokens_for_inf}), or check if web search context is taking to much space (current scrape per search: {max_url_scrape_len})\n"
-                print(f"[Warning] : {error_payload}")           
+                print(f"[Warning] : {error_payload}")  
+                yield f"data: {json.dumps({'error': error_payload})}\n\n"
+                yield "data: [DONE]\n\n"
+                return  #exits 
             
             
             generator.begin_stream(input_ids, settings)
             
             tokens_generated = 0
             start_time = time.time()
-            print("\nStarted Inference\n", end="", flush=True)
+            print(f"\nStarted Inference   -- (contex tokens: {prompt_len} / {MAX_CONTEXT})\n", end="", flush=True)
             
             while True:
                 
@@ -176,7 +179,7 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                 
             elapsed_time = time.time() - start_time
             tps = tokens_generated/elapsed_time if elapsed_time>= 0 else 0
-            print(f"\ngenerated {tokens_generated} tokens. tps = {tps}")                       
+            print(f"\nGenerated {tokens_generated} tokens. tps = {tps}\nTokens available for inference: {available_space_for_prompt}(used {tokens_generated})")                       
         
         
         #OoM

@@ -1,6 +1,6 @@
 import torch
 import os
-from exllamav2 import ExLlamaV2, ExLlamaV2Cache, ExLlamaV2Config, ExLlamaV2Tokenizer
+from exllamav2 import ExLlamaV2, ExLlamaV2Cache_Q8, ExLlamaV2Config, ExLlamaV2Tokenizer
 from exllamav2.generator import ExLlamaV2StreamingGenerator
 from config import MODEL_DIR, MAX_CONTEXT
 
@@ -25,8 +25,8 @@ def load_ai_model():
         #malloc for model
         model = ExLlamaV2(config)
         
-        #lazy cache (sequential, to avoid fragmentaion errors)
-        cache = ExLlamaV2Cache(model, max_seq_len=MAX_CONTEXT, lazy=True)
+        #lazy cache (sequential, to avoid fragmentaion errors) --> move to 8bit quantized cache 
+        cache = ExLlamaV2Cache_Q8(model, max_seq_len=MAX_CONTEXT, lazy=True)
         
         #loads weights on VRAM
         def progress_callback(step, tot):
