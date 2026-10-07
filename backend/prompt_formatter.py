@@ -13,7 +13,7 @@ def build_chatML_prompt(messages: List[Message]) -> str:
 
     system_parts = [
         f"Current date and time: {now}",
-        "You are a helpful AI assistant.",
+        "You are a helpful AI assistant. Reply in the language you are posed the question with",
     ]
 
     conversation_parts = []
