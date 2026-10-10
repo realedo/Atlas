@@ -7,10 +7,11 @@ MODEL_DIR = os.environ.get("dir_model")
 #----#
 
 #---- model settings ----#
-MAX_CONTEXT = 6656#trial and error for my gpu
-default_temp = 0.6
-default_max_tok_out = 2000
+MAX_CONTEXT = 8960#trial and error for my gpu !has to be X of 256
+default_temp = 0.8
+default_max_tok_out = 5120
 min_free_tokens_for_inf = 400
+max_memory_turns =4
 
 
 query_transform_temperature = 0.1

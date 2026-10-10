@@ -23,7 +23,8 @@ from config import default_max_tok_out, default_temp, WEB_TOGGLE, MAX_CONTEXT, m
 from prompt_formatter import Message, build_chatML_prompt
 from web_search import web_search, search_url
 from query_optimizer import gen_optimized_query_to_search
-
+from cot_masker import CoTFilter
+from memory_state import chat_state
 
 
 url_pattern = re.compile(r'(https?://[^\s]+)')
@@ -35,12 +36,14 @@ inference_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     success = load_ai_model()
+    chat_state.clear()
     if not success:
         print("[Error] Model did not load correctly")
         
     try:
         yield  
     finally:
+        chat_state.clear()
         clear_ai_model()
 
 
@@ -117,7 +120,7 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
     #get the last user's message
     last_user_message = next((msg.content for msg in reversed(req.messages) if msg.role == "user"), "")
            
-    modified_messages = list(req.messages)
+    modified_messages = [msg for msg in req.messages if msg.role == "system"]
     
     web_context=""
     if WEB_TOGGLE and last_user_message.strip():
@@ -157,14 +160,21 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
         modified_messages.insert(0,
                                  Message(
                                      role="system",
-                                     content=("You have access to the following web search results. Use them when they are relevant to the user's question."
+                                     content=("Your harness gives access to the following web search results. Use them when they are relevant to the user's question."
                                               "Prioritize the supplied sources for current or time-sensitive facts, but do not assume every result is accurate."
                                               "Do not invent facts or claim that a source supports something it does not. If the results are insufficient, say so."
                                               "Always provide extensive, highly detailed, and comprehensive answers. Never give brief or single-sentence responses."
-                                              "Cite relevant sources if you absolutly deem necessary to, using their supplied URLs.\n\n" f"{web_context}")
+                                              "Cite relevant sources if you absolutly deem necessary to, using their supplied URLs.\n\n" f"{web_context}"
+                                              "You are also using ExLlamaV3 inference engine on a tailored backend. the weights are from Qwen3.5(think) 10B 4bpw"
+                                              "Your harness also gives you a small state for the last few conversations."
+                                              "Make sure to reason and use an appropiate amount of CoT tokens if the task implies reasoning")
                                  )
                                 )
 
+    modified_messages.extend(chat_state.get_history())
+    if last_user_message.strip():
+        modified_messages.append(Message(role="user", content=last_user_message))    
+        
     formatted_prompt = build_chatML_prompt(modified_messages) #format before putting it into the model
 
     def event_stream():
@@ -208,11 +218,7 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                 )
             max_new_tokens = min(requested_tokens, available_tokens - 16)
             
-            temperature = (
-                    req.temperature
-                    if req.temperature is not None
-                    else default_temp
-                )
+            temperature = default_temp
 
             
             stop_conditions = ["<|im_end|>"]
@@ -245,9 +251,12 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
             start_time = time.time()
             generated_tokens = 0
             finish_reason = "stop"
+            was_thinking = False
             
-            thinking = False
-            buffer = ""
+            cot_masker = CoTFilter()
+            cot_tokens=0
+            
+            full_model_response = ""
 
             while generator.num_remaining_jobs():
                     results = generator.iterate()
@@ -261,59 +270,33 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
 
                         chunk = result.get("text", "")
                         if chunk:
-                            #generated_tokens += int(
-                            #    result.get("new_tokens", 0)
-                            #) if result.get("eos") else 0
+                            #generated_tokens += int(result.get("new_tokens", 0)) if result.get("eos") else 0
                             generated_tokens +=1
                             print(f"\rGenerating tokens... ({generated_tokens} / {max_new_tokens})", end="", flush=True)
                             
-                            #I dont want CoT to be printed --> buffer
-                            buffer += chunk
+                            was_thinking = cot_masker.in_think
                             
-                            while buffer:
-                                #if not thiking, check if <think> nearby
-                                if not thinking:
-                                    if "<think>" in buffer:
-                                        
-                                        before, buffer = buffer.split("<think>", 1)
-                                        if before:
-                                            yield sse(inference_chunk(content=before))
-                                        
-                                        yield sse(inference_chunk(content="*Making CoT...*\n\n"))
-                                           
-                                        thinking = True
-                                    
-                                    else:
-                                        
-                                        safe_to_yield = buffer
-                                        
-                                        #if it ends with <think> 
-                                        for i in range(1, 7):
-                                            if buffer.endswith("<think>"[:i]):
-                                                safe_to_yield = buffer[:-i]
-                                                buffer = buffer[-i:]
-                                                break
-                                        else:
-                                            buffer = ""
-                                            
-                                        if safe_to_yield:
-                                            yield sse(inference_chunk(content=safe_to_yield))
-                                        break
-                                else:
-                                    #in CoT mode
-                                    if "</think>" in buffer:
-                                        
-                                        _, buffer = buffer.split("</think>", 1)
-                                        thinking = False
-                                    else:
-                                        
-                                        for i in range(1, 8):
-                                            if buffer.endswith("</think>"[:i]):
-                                                buffer = buffer[-i:]
-                                                break
-                                        else:
-                                            buffer = ""
-                                        break
+                            filtered_output = cot_masker.process_chunk(chunk)
+                            
+                            #if CoT just started
+                            if not was_thinking and cot_masker.in_think:
+                                
+                                yield sse(inference_chunk(content="\n*CoT phase... 💭*\n\n"))
+
+                            #If acttivly in Cot
+                            if cot_masker.in_think or (was_thinking and not cot_masker.in_think):
+                                cot_tokens += 1
+
+                            #Cot finished
+                            if was_thinking and not cot_masker.in_think:
+                                
+                                print(f"\nCoT phase done. used : {cot_tokens} to think\n")
+
+                            #send output
+                            if filtered_output:
+                                #save model response in local memory
+                                full_model_response += filtered_output
+                                yield sse(inference_chunk(content=filtered_output))
                            
                         if result.get("eos"):
                             reason = result.get("eos_reason", "stop")
@@ -322,10 +305,11 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                             else:
                                 finish_reason = "stop"
                             break
-
-            if buffer and not thinking:
-                yield sse(inference_chunk(content=buffer))
-
+            
+            complete_output = cot_masker.flush()
+            if complete_output:
+                full_model_response += complete_output
+                yield sse(inference_chunk(content=complete_output))
                 
             elapsed_time = time.time() - start_time
             total_generated = getattr(job, "new_tokens", generated_tokens)
@@ -335,7 +319,9 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                     f"\nGeneration finished: {total_generated} tokens, "
                     f"{tps:.2f} tokens/s, {elapsed_time:.2f}s"
                 )
-
+            
+            #save convo to state
+            chat_state.add_interaction(last_user_message, full_model_response)
             yield sse(inference_chunk(finish_reason=finish_reason))
 
         
@@ -346,6 +332,7 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
                     job = locals().get("job")
                     if job is not None and generator.num_remaining_jobs():
                         generator.cancel(job)
+                        chat_state.clear()
                 except Exception:
                     pass
             raise

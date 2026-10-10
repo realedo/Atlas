@@ -1,92 +1,312 @@
 <!DOCTYPE html>
-<html lang="eng">
+<html lang="it">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Atlas - Local LLM Chat</title>
+    
+    <!-- Libreria per convertire il Markdown del modello in vero HTML -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    
     <style> 
+        :root {
+            /* Nuove variabili per tema Viola/Glassmorphism */
+            --glass-bg: rgba(30, 10, 40, 0.6); /* Viola scuro molto trasparente */
+            --glass-border: rgba(255, 255, 255, 0.15);
+            --glass-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
+            --accent-purple: #9d4edd;
+            --accent-glow: #e0aaff;
+            --code-bg: rgba(0, 0, 0, 0.5); /* Sfondo nero per il codice */
+            --code-text: #dcdcdc;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background-color: #1e1e1e;
-            color: #d4d4d4;
-            max-width: 800px;
-            margin: 40px auto;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            /* Sfondo sfumato Viola/Indaco per il Glassmorphism */
+            background: linear-gradient(-45deg, #1a0b2e, #2d1b4e, #4a1c6e, #120521);
+            background-size: 400% 400%;
+            animation: gradientBG 15s ease infinite;
+            color: #e0e0e0;
+            margin: 0;
+            height: 100vh; /* Altezza piena */
+            overflow: hidden; /* Evita scrollbar doppie */
+            display: flex;
+            flex-direction: column;
+        }
+
+        @keyframes gradientBG {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        /* CONTENITORE PRINCIPALE A SCHERMO INTERO */
+        .chat-container {
+            width: 100vw;
+            height: 100vh;
+            /* Glassmorphism Effect potenziato */
+            background: var(--glass-bg);
+            backdrop-filter: blur(15px); /* Effetto vetro */
+            -webkit-backdrop-filter: blur(15px);
+            border: 1px solid var(--glass-border);
+            border-radius: 0; /* Niente angoli per occupare tutto */
+            box-shadow: var(--glass-shadow);
+            display: flex;
+            flex-direction: column;
             padding: 20px;
+            box-sizing: border-box;
+            position: relative;
+            overflow: hidden;
         }
-        h2 { color: #569cd6; }
+
+        /* Effetto bagliore superiore per realismo vetro */
+        .chat-container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+        }
+
+        h2 { 
+            color: #fff; 
+            margin: 0 0 10px 0; /* Margini ridotti per schermo intero */
+            font-weight: 600;
+            letter-spacing: 1px;
+            text-align: center;
+            text-transform: uppercase;
+            /* Gradiente per il titolo */
+            background: linear-gradient(135deg, #e0aaff, #9d4edd);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 20px rgba(157, 78, 221, 0.3);
+            font-size: 1.5rem;
+        }
+
         #chat-box {
-            background-color: #252526;
-            border: 1px solid #3c3c3c;
-            border-radius: 8px;
-            height: 400px;
+            flex: 1;
             overflow-y: auto;
-            padding: 15px;
-            margin-bottom: 20px;
-            white-space: pre-wrap;
-            line-height: 1.5;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            padding: 0 20px 20px 20px;
+            width: 100%; /* Assicura che occupi tutta la larghezza disponibile */
+            max-width: 1000px; /* Opzionale: limita la larghezza massima per schermi larghissimi */
+            margin: 0 auto; /* Centra l'area di chat nel contenitore principale */
         }
+
+        /* Stile barra di scorrimento viola */
+        #chat-box::-webkit-scrollbar { width: 6px; }
+        #chat-box::-webkit-scrollbar-track { background: transparent; }
+        #chat-box::-webkit-scrollbar-thumb { background: rgba(157, 78, 221, 0.4); border-radius: 10px; }
+        #chat-box::-webkit-scrollbar-thumb:hover { background: rgba(157, 78, 221, 0.6); }
+
+        /* Fumetti generici */
+        .msg {
+            max-width: 80%; /* I messaggi non occupano tutto lo schermo */
+            padding: 14px 20px;
+            border-radius: 12px;
+            line-height: 1.6;
+            font-size: 0.95rem;
+            animation: fadeIn 0.3s ease;
+            position: relative;
+            word-wrap: break-word; /* Previene righe troppo lunghe */
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Fumetto Utente (Destra) - Viola scuro */
+        .msg-user {
+            align-self: flex-end; /* Spinge a destra */
+            background: rgba(76, 29, 149, 0.4); /* Viola medio trasparente */
+            border: 1px solid rgba(157, 78, 221, 0.3);
+            border-bottom-right-radius: 4px;
+            color: #fff;
+            box-shadow: 0 4px 15px rgba(76, 29, 149, 0.2);
+            margin-left: auto; /* Assicura che appoggi all'estrema destra */
+        }
+
+        /* Fumetto Modello (Sinistra) - Viola chiaro/Glass */
+        .msg-bot {
+            align-self: flex-start; /* Spinge a sinistra */
+            background: rgba(255, 255, 255, 0.08); /* Leggermente più chiaro */
+            border: 1px solid rgba(157, 78, 221, 0.2);
+            border-bottom-left-radius: 4px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            backdrop-filter: blur(5px);
+            margin-right: auto; /* Assicura che appoggi all'estrema sinistra */
+        }
+
+        /* --- STILE CODICE PRO --- */
+        .msg-bot h3 { margin-top: 0; color: #e0aaff; }
+        .msg-bot p:last-child { margin-bottom: 0; }
+        .msg-bot ul { padding-left: 20px; margin-bottom: 0; }
+        .msg-bot li { margin-bottom: 8px; }
+
+        /* Stile base per blocco codice */
+        .msg-bot pre {
+            background: var(--code-bg);
+            padding: 15px;
+            border-radius: 8px;
+            overflow-x: auto; /* Scroll orizzontale se il codice è troppo lungo */
+            margin: 10px 0;
+            border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.2);
+        }
+
+        .msg-bot code {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            color: var(--code-text);
+            font-size: 0.85em;
+            line-height: 1.4;
+            direction: ltr; /* Mantiene il codice inglese anche se la chat è in italiano */
+        }
+
+        /* Bottone "Copia" per i blocchi di codice */
+        .code-copy-btn {
+            position: absolute;
+            top: 5px;
+            right: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: #fff;
+            size: 16px;
+            padding: 4px 8px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-size: 12px;
+            opacity: 0.7;
+            transition: all 0.2s;
+            z-index: 10;
+        }
+        
+        .code-copy-btn:hover {
+            background: var(--accent-purple);
+            opacity: 1;
+        }
+
         .input-group {
             display: flex;
-            gap: 10px;
+            gap: 15px;
+            background: rgba(0, 0, 0, 0.2);
+            padding: 20px;
+            border-radius: 16px;
+            border: 1px solid var(--glass-border);
+            align-items: flex-end;
+            width: 90%;
+            margin: 0 auto; /* Centra l'input */
+            max-width: 1000px;
         }
+
         textarea {
             flex: 1;
-            background-color: #3c3c3c;
+            background: rgba(255, 255, 255, 0.05);
             color: #fff;
-            border: 1px solid #555;
-            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
             padding: 12px;
             resize: none;
-            height: 50px;
+            height: 45px;
             font-family: inherit;
+            font-size: 1rem;
+            border-radius: 12px;
+            transition: border-color 0.2s;
         }
+
+        textarea:focus { 
+            outline: none; 
+            border-color: var(--accent-purple);
+            background: rgba(255, 255, 255, 0.1);
+        }
+        textarea::placeholder { color: rgba(255,255,255,0.3); }
+
         button {
-            background-color: #0e639c;
+            background-color: var(--accent-purple);
             color: white;
-            border: none;
-            border-radius: 6px;
-            padding: 0 20px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 12px;
+            padding: 0 28px;
             cursor: pointer;
             font-weight: bold;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            box-shadow: 0 0 10px rgba(157, 78, 221, 0.3);
+            height: 45px; /* Allineato con textarea */
         }
-        button:hover { background-color: #1177bb; }
-        button:disabled { background-color: #444; cursor: not-allowed; }
+
+        button:hover:not(:disabled) { 
+            background-color: #c77dff; /* Viola più chiaro */
+            box-shadow: 0 0 20px rgba(157, 78, 221, 0.6);
+            transform: translateY(-2px);
+        }
+        button:disabled { 
+            background-color: rgba(255,255,255,0.1); 
+            color: rgba(255,255,255,0.3);
+            cursor: not-allowed; 
+            box-shadow: none;
+        }
     </style>
 </head>
 <body>
 
-    <h2>Atlas LLM (Qwen 2.5)</h2>
-    <div id="chat-box"></div>
+    <div class="chat-container">
+        <h2>Atlas</h2>
+        <div id="chat-box"></div>
 
-    <div class="input-group">
-        <textarea id="prompt-input" placeholder="Your message..."></textarea>
-        <button id="send-btn" onclick="sendPrompt()">Send</button>
+        <div class="input-group">
+            <textarea id="prompt-input" placeholder="Scrivi il tuo codice qui... (Invio per mandare, Shift+Invio per a capo)"></textarea>
+            <button id="send-btn" onclick="sendPrompt()">Invia</button>
+        </div>
     </div>
 
     <script>
+        // Impostazioni marked.js per gestire i blocchi di codice correttamente
+        const promptInput = document.getElementById('prompt-input');
+        const chatBox = document.getElementById('chat-box');
+        const sendBtn = document.getElementById('send-btn');
+
+        // Gestione tasto Invio per inviare velocemente
+        promptInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendPrompt();
+            }
+        });
+
         async function sendPrompt() {
-            const promptInput = document.getElementById('prompt-input');
-            const chatBox = document.getElementById('chat-box');
-            const sendBtn = disAbled = document.getElementById('send-btn');
-            
             const prompt = promptInput.value.trim();
             if (!prompt) return;
 
-            //user message
-            chatBox.innerHTML += `\n\n<b>You:</b> ${prompt}\n<b>Atlas:</b> `;
+            // 1. Crea il fumetto dell'utente
+            const userMsgDiv = document.createElement('div');
+            userMsgDiv.className = 'msg msg-user';
+            userMsgDiv.textContent = prompt;
+            chatBox.appendChild(userMsgDiv);
+
+            // Resetta input e scorri in basso
             promptInput.value = '';
             sendBtn.disabled = true;
             chatBox.scrollTop = chatBox.scrollHeight;
 
+            // 2. Prepara il fumetto vuoto per Atlas
+            const botMsgDiv = document.createElement('div');
+            botMsgDiv.className = 'msg msg-bot';
+            chatBox.appendChild(botMsgDiv);
+            
+            let fullBotText = ""; // Accumulatore per il markdown
+
             try {
-                // endpoint api call
                 const response = await fetch('http://127.0.0.1:8000/v1/chat/completions', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    //settings
                     body: JSON.stringify({
                         messages: [
-                            { role: "system", content: "You are a locally run chatbot. for all sakes your name is Atlas" },
+                            { role: "system", content: "You are a locally run chatbot. for all sakes your name is Atlas. use <think> tags for deep reasoning ans step by step logic." },
                             { role: "user", content: prompt }
                         ],
                         max_tokens: 5000,
@@ -108,7 +328,6 @@
                     buffer += decoder.decode(value, { stream: true });
                     const lines = buffer.split('\n');
                     
-                    
                     buffer = lines.pop(); 
 
                     for (const line of lines) {
@@ -122,19 +341,22 @@
                             const json = JSON.parse(dataStr);
                             const content = json.choices?.[0]?.delta?.content;
                             if (content) {
-                                // write chunks
-                                chatBox.innerHTML += content;
+                                // Accumula il testo e convertilo in HTML con marked.js
+                                fullBotText += content;
+                                // marked.parse genera <pre><code> che il CSS gestisce come blocchi "Pro"
+                                botMsgDiv.innerHTML = marked.parse(fullBotText);
                                 chatBox.scrollTop = chatBox.scrollHeight;
                             }
                         } catch (e) {
-                            // ignore empty chunks
+                            // ignora json rotti nel buffer
                         }
                     }
                 }
             } catch (err) {
-                chatBox.innerHTML += `\n[Errore: ${err.message}]`;
+                botMsgDiv.innerHTML += `<br><span style="color: #ff80b5;">[Errore: ${err.message}]</span>`;
             } finally {
                 sendBtn.disabled = false;
+                promptInput.focus();
             }
         }
     </script>
