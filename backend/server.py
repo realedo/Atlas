@@ -137,7 +137,7 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
             settings = ExLlamaV2Sampler.Settings()
             settings.temperature = req.temperature
             
-            #encode prompt
+            #encode prompt.  - can i encode the actual prompt just 1 time? as in encode on search then encode the contex and add them togeter? might save performance.
             input_ids = tokenizer.encode(formatted_prompt)
             
             # !! check if the prompt is not out of bound of max context lenght allowed !! #
