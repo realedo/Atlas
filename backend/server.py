@@ -205,4 +205,5 @@ async def chat_endpoint(req: ChatCompletionRequest): #req structure declared bef
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "gpu_ready": "generator" in state} #fails if generator is yielded as empty (expetion as e)
+    ready = bool(state.get("generator")) and bool(state.get("tokenizer"))
+    return {"status": "ok" if ready else "not_ready", "gpu_ready": ready}

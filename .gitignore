@@ -3,3 +3,7 @@ venv
 __pycache__
 .vscode
 backend/__pycache__
+backend/.env
+backend_exv3/__pycache__
+backend_exv3/.env
+backend_exv3/venv_v3

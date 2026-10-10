@@ -47,11 +47,11 @@ def load_ai_model():
         print(f"VRAM OoM during loading. Try lowering {MAX_CONTEXT}")
         #free corrupted malloc(s)
         torch.cuda.empty_cache() 
-        return True
+        return False
     
     except Exception as e:
         print(f"Failed to load model. -> {str(e)}")
-        return True
+        return False
     
     
 def clear_ai_model():  
