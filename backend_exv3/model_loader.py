@@ -38,6 +38,9 @@ def load_ai_model():
             k_bits=chache_quantization,
             v_bits=chache_quantization,
         )
+
+            
+        
         
         model.load(progressbar=True)
         tokenizer = Tokenizer.from_config(config)

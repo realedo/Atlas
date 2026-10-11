@@ -1,0 +1,6 @@
+{
+  "permissions": {
+    "deny": ["Agent", "Agent(general-purpose)"]
+  },
+  "autoCompactThreshold": 60
+}

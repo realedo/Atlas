@@ -17,7 +17,7 @@ def build_chatML_prompt(messages: List[Message]) -> str:
     now = datetime.datetime.now().strftime("%A, %B %d, %Y, %H:%M")
 
     system_parts = [
-        f"Current date and time: {now}",
+        f"",
         "You are a helpful AI assistant. Reply in the same language as the user's question.",
     ]
 

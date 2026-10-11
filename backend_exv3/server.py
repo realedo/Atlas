@@ -226,6 +226,15 @@ async def chat_completions(raw_req: Request):
                         temperature=float(req_temperature),
                     )
                 
+                get_cache_stats = getattr(generator, "get_cache_stats", None)
+                cache_before = (
+                    get_cache_stats()
+                    if callable(get_cache_stats)
+                    else None
+                )
+                                
+                
+                
                 job = Job(
                         input_ids=input_ids,
                         max_new_tokens=max_new_tokens,
@@ -241,7 +250,7 @@ async def chat_completions(raw_req: Request):
                         f"\n{INFO} Starting EXL3 inference "
                         f"(prompt: {prompt_len}/{MAX_CONTEXT} tokens, "
                         f"max output: {max_new_tokens}, "
-                        f"temperature: {req_temperature})"
+                        f"temperature: {req_temperature})\nStarting prefill...\n"
                     )
 
                 start_time = time.time()
@@ -272,6 +281,13 @@ async def chat_completions(raw_req: Request):
 
                             if result.get("stage") != "streaming":
                                 continue
+                            if result.get("job") is job and result.get("eos"):
+                                print(
+                                    "\n[KV cache] "
+                                    f"cached_tokens={result.get('cached_tokens', 0)}, "
+                                    f"cached_pages={result.get('cached_pages', 0)}, "
+                                    f"prefill_time={result.get('time_prefill', 'n/a')}s"
+                                )
 
                             chunk = result.get("text", "")
                             
@@ -324,6 +340,28 @@ async def chat_completions(raw_req: Request):
                                     finish_reason = "tool_calls" if did_tool_call else "stop"
                                 break
                 
+                            
+                if cache_before is not None:
+                    cache_after = get_cache_stats()
+
+                    reused_pages = (
+                        cache_after["alloc_cached_pages"]
+                        - cache_before["alloc_cached_pages"]
+                    )
+                    allocated_pages = (
+                        cache_after["alloc_pages"]
+                        - cache_before["alloc_pages"]
+                    )
+                    page_size = cache_after["page_size"]
+
+                print(
+                    f"{INFO} Prefix cache: reused {reused_pages} pages "
+                    f"(~{reused_pages * page_size} tokens); "
+                    f"allocated {allocated_pages} pages"
+                )
+                            
+                            
+                            
                 complete_output = cot_masker.flush()
                 if complete_output:
                     full_model_response += complete_output
