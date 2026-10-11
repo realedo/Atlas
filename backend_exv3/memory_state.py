@@ -22,7 +22,7 @@ class ConversationMemory:
         return self.history
 
     def clear(self):
-        """Svuota la memoria della chat."""
+
         self.history = []
 
 #memory importable on main code.

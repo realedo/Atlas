@@ -5,6 +5,11 @@ from prompt_formatter import Message
 from web_search import search_url, web_search
 from query_optimizer import gen_optimized_query_to_search
 
+#print() colors
+INFO = "\033[92m[Info]\033[0m"
+WARN = "\033[93m[Warning]\033[0m"
+ERR = "\033[91m[Error]\033[0m"
+
 url_pattern = re.compile(r'(https?://[^\s]+)')
 
 def add_web_context(last_user_message, inference_lock, generator, tokenizer, safe_messages):
@@ -18,11 +23,11 @@ def add_web_context(last_user_message, inference_lock, generator, tokenizer, saf
             urls_present = url_pattern.findall(last_user_message)
             if urls_present:
                 url_to_search = urls_present[0]
-                print(f"Url ({url_to_search}) found in prompt, proceding to scrape from said url...\n")
+                print(f"{INFO} Url ({url_to_search}) found in prompt, proceding to scrape from said url...\n")
                 web_context = search_url(url_to_search)
                     
             else:
-                print(f"No direct URLs found in prompt. generating a optimized search query...\n")
+                print(f"{WARN} No direct URLs found in prompt. generating a optimized search query...\n")
                 
                 with inference_lock: #cant inference both gen_optimized_query_to_search() and event_stream()
                     optimized_query = gen_optimized_query_to_search(
@@ -31,14 +36,14 @@ def add_web_context(last_user_message, inference_lock, generator, tokenizer, saf
                         last_user_message,
                     )
 
-                print(f"Searching for: {optimized_query}")
+                print(f"{INFO}  Searching for: {optimized_query}\n")
                 web_context = web_search(optimized_query)
 
         except Exception as e:
-            print(f"[Warning] Failed web search: {str(e)}")
+            print(f"{WARN} Failed web search: {str(e)}")
             web_context = ""
         
-        print(f"Searched for {time.time()- web_start_time:.2f} seconds...\n")
+        print(f"{INFO}  Searched for {time.time()- web_start_time:.2f} seconds...\n")
     
     if web_context and not web_context.startswith(("Web search initialization failed:", "Web search is disabled")):
         #add web search

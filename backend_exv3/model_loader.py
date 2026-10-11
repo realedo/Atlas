@@ -5,17 +5,19 @@ from exllamav3 import Config, Model, Cache, Tokenizer, Generator
 from exllamav3.cache import CacheLayer_quant
 from config import MODEL_DIR, MAX_CONTEXT, chache_quantization
 
-
+#print() colors
+INFO = "\033[92m[Info]\033[0m"
+ERR = "\033[91m[Error]\033[0m"
 
 state = {} # dynamic global dict. (persist on verious HTTPS req.)
 
 def load_ai_model():
     
     if not MODEL_DIR or not os.path.exists(MODEL_DIR):
-        print(f"model directory invalid or missing : {MODEL_DIR}")
+        print(f"{ERR} model directory invalid or missing : {MODEL_DIR}")
         return False
     #loading model onto ExLlamaV3
-    print(f"Loading model from : {MODEL_DIR}...")
+    print(f"{INFO} Loading model from : {MODEL_DIR}...")
     model = None
     cache = None
     tokenizer = None
@@ -55,18 +57,18 @@ def load_ai_model():
             "generator": generator,
         })
 
-        print("Model loaded successfully.")
+        print(f"{INFO} Model loaded successfully.")
         return True
 
         
     except torch.cuda.OutOfMemoryError:
-        print(f"[Error] VRAM OoM during loading. Try lowering {MAX_CONTEXT}")
+        print(f"{ERR} VRAM OoM during loading. Try lowering {MAX_CONTEXT}")
         #free corrupted malloc(s)
         torch.cuda.empty_cache() 
         return False
     
     except Exception as e:
-        print(f"[Error] Failed to load model. -> {str(e)}")
+        print(f"{ERR} Failed to load model. -> {str(e)}")
         return False
     
 

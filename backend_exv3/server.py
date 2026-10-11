@@ -25,11 +25,20 @@ url_pattern = re.compile(r'(https?://[^\s]+)')
 
 inference_lock = threading.Lock()
 
+#print() colors
+INFO = "\033[92m[Info]\033[0m"
+WARN = "\033[93m[Warning]\033[0m"
+ERR = "\033[91m[Error]\033[0m"
+
+
+
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     success = load_ai_model()
     if not success:
-        print("[Error] Model did not load correctly")
+        print(f"{ERR} Model did not load correctly")
         
     try:
         yield  
@@ -229,13 +238,17 @@ async def chat_completions(raw_req: Request):
                 started = True
                 
                 print(
-                        f"\nStarting EXL3 inference "
+                        f"\n{INFO} Starting EXL3 inference "
                         f"(prompt: {prompt_len}/{MAX_CONTEXT} tokens, "
                         f"max output: {max_new_tokens}, "
                         f"temperature: {req_temperature})"
                     )
 
                 start_time = time.time()
+                generation_start_time = start_time
+                prefill_done = False
+                time_to_prefill = 0.0
+                
                 generated_tokens = 0
                 finish_reason = "stop"
                 was_thinking = False
@@ -261,9 +274,18 @@ async def chat_completions(raw_req: Request):
                                 continue
 
                             chunk = result.get("text", "")
+                            
+                            if not prefill_done and (chunk or result.get("eos")):
+                                time_to_prefill = time.time() - start_time
+                                print(f"{INFO} Done prefilling prompt in {time_to_prefill}\n")
+                                generation_start_time = time.time()
+                                prefill_done = True
+                            
+                            
+                            
                             if chunk:
                                 generated_tokens +=1
-                                print(f"\rGenerating tokens... ({generated_tokens} / {max_new_tokens})", end="", flush=True)
+                                print(f"\r{INFO} Generating tokens... ({generated_tokens} / {max_new_tokens})", end="", flush=True)
                                 
                                 was_thinking = cot_masker.in_think
                                 filtered_output = cot_masker.process_chunk(chunk)
@@ -279,7 +301,7 @@ async def chat_completions(raw_req: Request):
 
                                 #Cot finished
                                 if was_thinking and not cot_masker.in_think:
-                                    print(f"\nCoT phase done. used : {cot_tokens} to think\n")
+                                    print(f"\n{INFO} CoT phase done. used : {cot_tokens} to think\n")
 
                                 #send output
                                 if filtered_output:
@@ -312,7 +334,7 @@ async def chat_completions(raw_req: Request):
                 tps = total_generated / elapsed_time if elapsed_time > 0 else 0
 
                 print(
-                        f"\nGeneration finished: {total_generated} tokens, "
+                        f"\n{INFO} Generation finished: {total_generated} tokens, "
                         f"{tps:.2f} tokens/s, {elapsed_time:.2f}s"
                     )
                 
@@ -344,7 +366,7 @@ async def chat_completions(raw_req: Request):
                 })
             #general exeption
             except Exception as exc:
-                print(f"[ERROR] Inference failed: {exc}")
+                print(f"{ERR} Inference failed: {exc}")
                 yield sse({
                     "error": {
                         "message": f"Inference failed: {str(exc)}",

@@ -4,6 +4,9 @@ from ddgs import DDGS
 from config import MX_RES, WEB_TOGGLE, append_links, append_images, max_url_scrape_len, mx_trafilatura_per_prompt
 
 
+#print() colors
+INFO = "\033[92m[Info]\033[0m"
+
 url_pattern = re.compile(r'(https?://[^\s]+)')
 
 
@@ -16,11 +19,11 @@ def search_url(url: str, max_len: int =max_url_scrape_len) -> str:
             
             text = trafilatura.extract(downloaded_data, include_links=append_links, include_images=append_images)
             if text:
-                print(f"extracted context from given URL({url})\n")
+                print(f"{INFO} Extracted context from given URL({url})\n")
                 return text[:max_len] + f"...\n Articole has been cutted due to being longer than max len ({max_len})"
     
     except Exception as e:
-        print(f"An error has occured qhile fetchijg data from {url}: {str(e)}")
+        print(f"{Warning} An error has occured while fetching data from {url}: {str(e)}")
         return "Could not fetch data from provided url"
             
 
@@ -59,14 +62,14 @@ def web_search(query: str, max_res: int = MX_RES) -> str:
 
                 i = mx_trafilatura_per_prompt
                 if i > max_res:
-                    print(f"[Warning] Attempring to get data from more href than the href scraped, check config!")
+                    print(f"{Warning} Attempring to get data from more href than the href scraped, check config!")
                     i = max_res
                 j = 0
                 while j<i:  #start at index 0 so no <=
                     url_to_search_ddgs = results[j].get('href')
                     if url_to_search_ddgs:
                         lines.append("\nData from the first page hitted: \n") 
-                        print(f"Attempting to extarct data from result {j+1} \n")
+                        print(f"{INFO} Attempting to extarct data from result {j+1} \n")
                         lines.append(search_url(url_to_search_ddgs))
                         j += 1 #increses count
                         
