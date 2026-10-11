@@ -13,12 +13,11 @@ from exllamav3.generator.sampler import ComboSampler
 import time
 import json
 import re
-import asyncio
 
 from model_loader import load_ai_model, clear_ai_model, state
 from config import default_max_tok_out, default_temp, MAX_CONTEXT, min_free_tokens_for_inf, max_url_scrape_len
 from prompt_formatter import Message, build_chatML_prompt
-from cot_masker import CoTFilter
+from masker import ToolFilter, CoTFilter
 from sliding_window import prune_messages_to_fit
 from search_appender import add_web_context
 
@@ -79,12 +78,18 @@ class ChatCompletionRequest(BaseModel): #completions
 def sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-def inference_chunk(content=None, finish_reason=None):
+def inference_chunk(content=None, tool_call=None, finish_reason=None):
+    delta = {}
+    if content is not None:
+        delta["content"] = content
+    if tool_call is not None:
+        delta["tool_calls"] = [tool_call]
+        
     return {
         "choices": [
             {
                 "index": 0,
-                "delta": {} if content is None else {"content": content},
+                "delta": delta,
                 "finish_reason": finish_reason,
             }
         ]
@@ -107,7 +112,8 @@ async def chat_completions(raw_req: Request):
     for m in data.get("messages", []):
         role = m.get("role", "user")
         content = m.get("content", "")
-        
+        tool_calls = m.get("tool_calls")
+        tool_call_id = m.get("tool_call_id")
         
         if isinstance(content, list):
             parsed_content = []
@@ -115,7 +121,6 @@ async def chat_completions(raw_req: Request):
                 if isinstance(item, dict) and "text" in item:
                     parsed_content.append(item["text"])
                 else:
-                    # Keep tool_use and tool_result blocks intact as JSON strings
                     parsed_content.append(json.dumps(item, ensure_ascii=False))
             content = " ".join(parsed_content)
         elif not content:
@@ -123,7 +128,12 @@ async def chat_completions(raw_req: Request):
         else:
             content = str(content)
             
-        safe_messages.append(Message(role=role, content=content))
+        safe_messages.append(Message(
+            role=role, 
+            content=content, 
+            tool_calls=tool_calls, 
+            tool_call_id=tool_call_id
+        ))
         
     req_max_tokens = min(data.get("max_tokens", 8192), default_max_tok_out)
     req_temperature = data.get("temperature", default_temp)
@@ -133,11 +143,25 @@ async def chat_completions(raw_req: Request):
     
     add_web_context(last_user_message, inference_lock, generator, tokenizer, safe_messages)
     
+    
+    tools = data.get("tools", [])
+    if tools:
+        tool_prompt = (
+            "You have access to the following tools:\n\n"
+            f"<tools>\n{json.dumps(tools, ensure_ascii=False, indent=2)}\n</tools>\n\n"
+            "To use a tool, you MUST respond using the following XML format:\n"
+            "<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"arg_name\": \"value\"}}\n</tool_call>\n"
+            "Do not output anything else after the tool call."
+        )
+        safe_messages.insert(0, Message(role="system", content=tool_prompt))
+    
     safe_messages = prune_messages_to_fit(
-        safe_messages, 
-        tokenizer, 
-        max_allowed_tokens=(MAX_CONTEXT - min_free_tokens_for_inf)
-    )
+            safe_messages, 
+            tokenizer, 
+            max_allowed_tokens=(MAX_CONTEXT - min_free_tokens_for_inf)
+        )
+    
+    
     
     formatted_prompt = build_chatML_prompt(safe_messages) 
     input_ids = tokenizer.encode(formatted_prompt, encode_special_tokens=True)
@@ -218,6 +242,8 @@ async def chat_completions(raw_req: Request):
                 
                 cot_masker = CoTFilter()
                 cot_tokens=0
+                tool_masker = ToolFilter()
+                did_tool_call = False
                 full_model_response = ""
 
                 while generator.num_remaining_jobs():
@@ -257,15 +283,23 @@ async def chat_completions(raw_req: Request):
 
                                 #send output
                                 if filtered_output:
-                                    full_model_response += filtered_output
-                                    yield sse(inference_chunk(content=filtered_output))
+                                    text_out, tool_out = tool_masker.process_chunk(filtered_output)
+                                    
+                                    if text_out:
+                                        full_model_response += text_out
+                                        yield sse(inference_chunk(content=text_out))
+                                        
+                                    if tool_out:
+                                        did_tool_call = True
+                                        yield sse(inference_chunk(tool_call=tool_out))
                             
                             if result.get("eos"):
                                 reason = result.get("eos_reason", "stop")
                                 if reason == "max_new_tokens":
                                     finish_reason = "length"
                                 else:
-                                    finish_reason = "stop"
+                                    
+                                    finish_reason = "tool_calls" if did_tool_call else "stop"
                                 break
                 
                 complete_output = cot_masker.flush()
