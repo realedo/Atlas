@@ -21,7 +21,16 @@ class ToolFilter:
                     self.tool_json_buffer += tool_data
                     
                     try:
-                        t_json = json.loads(self.tool_json_buffer.strip())
+                        raw_json_str = self.tool_json_buffer.strip()
+                        
+                        try:
+                            # 1. Try parsing exactly as the model provided it
+                            t_json = json.loads(raw_json_str)
+                        except json.JSONDecodeError:
+                            # 2. Fallback: Only escape backslashes that are NOT valid JSON escapes (like \n, \", \\)
+                            sanitized = re.sub(r'\\(?![\"\\/bfnrtu])', r'\\\\', raw_json_str)
+                            t_json = json.loads(sanitized)
+
                         tool_out = {
                             "index": 0,
                             "id": self.call_id,
@@ -31,8 +40,9 @@ class ToolFilter:
                                 "arguments": json.dumps(t_json.get("arguments", {}))
                             }
                         }
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"\n\033[91m[Error]\033[0m Failed to parse tool JSON: {str(e)}")
+                        print(f"Raw buffer: {self.tool_json_buffer.strip()}")
                         
                     self.in_tool = False
                     self.tool_json_buffer = ""
@@ -101,8 +111,8 @@ class CoTFilter:
                 if "<think>" in self.buffer:
                     before, self.buffer = self.buffer.split("<think>", 1)
                     if before:
-                        # Clean out rogue XML tags (like <severity>) if they leak outside think blocks
-                        cleaned_before = re.sub(r'<[^>]+>', '', before)
+                        # Clean out rogue XML tags while preserving tool_call tags
+                        cleaned_before = re.sub(r'<(?!/?tool_call>)[^>]+>', '', before)
                         if cleaned_before.strip():
                             output += cleaned_before
                             self.has_real_text = True 
@@ -120,8 +130,8 @@ class CoTFilter:
                         self.buffer = ""
                         
                     if safe_to_yield:
-                        # Filter out stray unhandled tags to prevent breaking LiteLLM streams
-                        cleaned_yield = re.sub(r'<[^>]+>', '', safe_to_yield)
+                        # Filter out stray unhandled tags while preserving tool_call tags
+                        cleaned_yield = re.sub(r'<(?!/?tool_call>)[^>]+>', '', safe_to_yield)
                         if cleaned_yield.strip():
                             output += cleaned_yield
                             self.has_real_text = True
@@ -129,8 +139,8 @@ class CoTFilter:
                 
         return output
 
-    def flush(self) -> str:
-        if self.buffer and not self.in_think:
+    def flush(self, force=False) -> str:
+        if self.buffer and (not self.in_think or force):
             output = self.buffer
             self.buffer = ""
             return output

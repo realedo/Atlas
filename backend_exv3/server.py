@@ -87,14 +87,21 @@ class ChatCompletionRequest(BaseModel): #completions
 def sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-def inference_chunk(content=None, tool_call=None, finish_reason=None):
+# In server.py (replace your existing inference_chunk function)
+def inference_chunk(content=None, tool_call=None, finish_reason=None, role=None):
     delta = {}
+    if role is not None:
+        delta["role"] = role
     if content is not None:
         delta["content"] = content
     if tool_call is not None:
         delta["tool_calls"] = [tool_call]
         
     return {
+        "id": f"chatcmpl-{int(time.time()*1000)}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": "exllamav3-local",
         "choices": [
             {
                 "index": 0,
@@ -246,6 +253,8 @@ async def chat_completions(raw_req: Request):
                 generator.enqueue(job)
                 started = True
                 
+                yield sse(inference_chunk(role="assistant"))
+                
                 print(
                         f"\n{INFO} Starting EXL3 inference "
                         f"(prompt: {prompt_len}/{MAX_CONTEXT} tokens, "
@@ -293,7 +302,7 @@ async def chat_completions(raw_req: Request):
                             
                             if not prefill_done and (chunk or result.get("eos")):
                                 time_to_prefill = time.time() - start_time
-                                print(f"{INFO} Done prefilling prompt in {time_to_prefill}\n")
+                                print(f"{INFO} Done prefilling prompt in {time_to_prefill} seconds : (read {prompt_len} / {time_to_prefill} tok/sec)\n")
                                 generation_start_time = time.time()
                                 prefill_done = True
                             
@@ -301,8 +310,8 @@ async def chat_completions(raw_req: Request):
                             
                             if chunk:
                                 generated_tokens +=1
-                                print(f"\r{INFO} Generating tokens... ({generated_tokens} / {max_new_tokens})", end="", flush=True)
-                                
+                                if (generated_tokens % 100) == 0:  # Only print every 150 tokens
+                                    print(f"\r{INFO} Generating tokens... ({generated_tokens} / {max_new_tokens})", end="")
                                 was_thinking = cot_masker.in_think
                                 filtered_output = cot_masker.process_chunk(chunk)
                                 
@@ -363,8 +372,12 @@ async def chat_completions(raw_req: Request):
                             
                             
                             
-                complete_output = cot_masker.flush()
+                is_length_truncated = (finish_reason == "length")
+                complete_output = cot_masker.flush(force=is_length_truncated)
+                
                 if complete_output:
+                    if is_length_truncated and cot_masker.in_think:
+                        complete_output = f"\n\n[System: Generation truncated by max_tokens limit while thinking.]\n"
                     full_model_response += complete_output
                     yield sse(inference_chunk(content=complete_output))
                     
@@ -378,6 +391,8 @@ async def chat_completions(raw_req: Request):
                     )
                 
                 yield sse(inference_chunk(finish_reason=finish_reason))
+                
+                yield "data: [DONE]\n\n"
 
             
             #bug fix from v2, stop inference if clients disconnects
@@ -403,6 +418,8 @@ async def chat_completions(raw_req: Request):
                         "type": "server_error",
                     }
                 })
+                yield "data: [DONE]\n\n"
+                
             #general exeption
             except Exception as exc:
                 print(f"{ERR} Inference failed: {exc}")
@@ -412,9 +429,8 @@ async def chat_completions(raw_req: Request):
                         "type": "server_error",
                     }
                 })
-
-            finally:
                 yield "data: [DONE]\n\n"
+
 
     return StreamingResponse(
         event_stream(),

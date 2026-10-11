@@ -13,7 +13,7 @@ default_temp = 0.6
 default_max_tok_out = 8192
 min_free_tokens_for_inf = 4096
 max_memory_turns =4
-sliding_window_trocate_buffer = 50
+sliding_window_trocate_buffer = 400
 
 query_transform_temperature = 0.1
 query_transform_max_tokens = 300
