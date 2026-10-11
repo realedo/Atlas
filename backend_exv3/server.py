@@ -329,6 +329,7 @@ async def chat_completions(raw_req: Request):
                                         
                                     if tool_out:
                                         did_tool_call = True
+                                        print(f"{WARN} Executing tool: {tool_out['function']['name']}")
                                         yield sse(inference_chunk(tool_call=tool_out))
                             
                             if result.get("eos"):

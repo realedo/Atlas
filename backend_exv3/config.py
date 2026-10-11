@@ -7,7 +7,7 @@ MODEL_DIR = os.environ.get("dir_model")
 #----#
 
 #---- model settings ----#
-MAX_CONTEXT =51200#trial and error for my gpu !has to be X of 256   --- 24576 --32768
+MAX_CONTEXT =64000#trial and error for my gpu !has to be X of 256   --- 24576 --32768 --51200
 chache_quantization = 4
 default_temp = 0.6
 default_max_tok_out = 8192

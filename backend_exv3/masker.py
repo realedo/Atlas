@@ -1,6 +1,6 @@
 import json
 import time
-
+import re
 
 class ToolFilter:
     def __init__(self):
@@ -21,7 +21,6 @@ class ToolFilter:
                     self.tool_json_buffer += tool_data
                     
                     try:
-                        
                         t_json = json.loads(self.tool_json_buffer.strip())
                         tool_out = {
                             "index": 0,
@@ -48,7 +47,6 @@ class ToolFilter:
                     self.in_tool = True
                 else:
                     safe_to_yield = self.buffer
-                    # Blocca la scrittura se la stringa in arrivo sembra iniziare un tag <tool_call>
                     for i in range(1, 12): 
                         if self.buffer.endswith("<tool_call>"[:i]):
                             safe_to_yield = self.buffer[:-i]
@@ -60,18 +58,15 @@ class ToolFilter:
                     if safe_to_yield:
                         text_out += safe_to_yield
                     break
-                    
+                
         return text_out, tool_out
 
     def flush(self) -> str:
         out = self.buffer if not self.in_tool else ""
         self.buffer = ""
         return out
-    
-    
-    
-    
-    
+
+
 class CoTFilter:
     def __init__(self):
         self.in_think = False
@@ -79,9 +74,7 @@ class CoTFilter:
         self.has_real_text = False
         self.buffer = ""
 
-    
     def process_chunk(self, chunk: str) -> str:
-       
         self.buffer += chunk
         output = ""
 
@@ -104,12 +97,14 @@ class CoTFilter:
                     output += self.buffer
                     self.buffer = ""
                     break
-                    
+                
                 if "<think>" in self.buffer:
                     before, self.buffer = self.buffer.split("<think>", 1)
                     if before:
-                        output += before
-                        if before.strip():
+                        # Clean out rogue XML tags (like <severity>) if they leak outside think blocks
+                        cleaned_before = re.sub(r'<[^>]+>', '', before)
+                        if cleaned_before.strip():
+                            output += cleaned_before
                             self.has_real_text = True 
                             
                     if not self.has_real_text:
@@ -125,15 +120,16 @@ class CoTFilter:
                         self.buffer = ""
                         
                     if safe_to_yield:
-                        output += safe_to_yield
-                        if safe_to_yield.strip():
+                        # Filter out stray unhandled tags to prevent breaking LiteLLM streams
+                        cleaned_yield = re.sub(r'<[^>]+>', '', safe_to_yield)
+                        if cleaned_yield.strip():
+                            output += cleaned_yield
                             self.has_real_text = True
                     break
-                    
+                
         return output
 
     def flush(self) -> str:
-        
         if self.buffer and not self.in_think:
             output = self.buffer
             self.buffer = ""
