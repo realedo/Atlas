@@ -8,6 +8,10 @@ class ToolFilter:
         self.buffer = ""
         self.tool_json_buffer = ""
         self.call_id = f"call_{int(time.time()*1000)}"
+        
+    def _generate_id(self):
+        
+        return f"call_{int(time.time()*1000000)}"
 
     def process_chunk(self, chunk: str) -> tuple[str, dict]:
         self.buffer += chunk
@@ -24,12 +28,24 @@ class ToolFilter:
                         raw_json_str = self.tool_json_buffer.strip()
                         
                         try:
-                            # 1. Try parsing exactly as the model provided it
-                            t_json = json.loads(raw_json_str)
+                            # 1. Try parsing exactly as provided. strict=False allows 
+                            # literal unescaped newlines/tabs inside code blocks.
+                            t_json = json.loads(raw_json_str, strict=False)
                         except json.JSONDecodeError:
-                            # 2. Fallback: Only escape backslashes that are NOT valid JSON escapes (like \n, \", \\)
-                            sanitized = re.sub(r'\\(?![\"\\/bfnrtu])', r'\\\\', raw_json_str)
-                            t_json = json.loads(sanitized)
+                            # 2. Fallback: Safely escape invalid backslashes (like \U in Windows paths) 
+                            # without corrupting already valid escapes or double backslashes.
+                            def fix_escapes(m):
+                                text = m.group(0)
+                                # If it's a valid JSON escape sequence, leave it alone
+                                if text in ['\\"', '\\\\', '\\/', '\\b', '\\f', '\\n', '\\r', '\\t']:
+                                    return text
+                                if text.startswith('\\u'):
+                                    return text
+                                # If it's invalid (like \U or \D), add a second backslash
+                                return '\\\\' + text[1:]
+                                
+                            sanitized = re.sub(r'\\.', fix_escapes, raw_json_str)
+                            t_json = json.loads(sanitized, strict=False)
 
                         tool_out = {
                             "index": 0,
@@ -40,6 +56,9 @@ class ToolFilter:
                                 "arguments": json.dumps(t_json.get("arguments", {}))
                             }
                         }
+                        self.call_id = self._generate_id()
+                        
+                        
                     except Exception as e:
                         print(f"\n\033[91m[Error]\033[0m Failed to parse tool JSON: {str(e)}")
                         print(f"Raw buffer: {self.tool_json_buffer.strip()}")
@@ -75,7 +94,6 @@ class ToolFilter:
         out = self.buffer if not self.in_tool else ""
         self.buffer = ""
         return out
-
 
 class CoTFilter:
     def __init__(self):

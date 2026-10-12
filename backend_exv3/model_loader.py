@@ -3,7 +3,7 @@ import os
 import gc
 from exllamav3 import Config, Model, Cache, Tokenizer, Generator
 from exllamav3.cache import CacheLayer_quant
-from config import MODEL_DIR, MAX_CONTEXT, chache_quantization
+from config import MODEL_DIR, MAX_CONTEXT, chache_quantization, kv_cache_bits
 
 #print() colors
 INFO = "\033[92m[Info]\033[0m"
@@ -35,8 +35,8 @@ def load_ai_model():
             max_num_tokens=MAX_CONTEXT,
             max_batch_size=1,
             layer_type=CacheLayer_quant,
-            k_bits=chache_quantization,
-            v_bits=chache_quantization,
+            k_bits=kv_cache_bits,
+            v_bits=kv_cache_bits,
         )
 
             

@@ -15,7 +15,7 @@ import json
 import re
 
 from model_loader import load_ai_model, clear_ai_model, state
-from config import default_max_tok_out, default_temp, MAX_CONTEXT, min_free_tokens_for_inf, max_url_scrape_len
+from config import default_max_tok_out, default_temp, MAX_CONTEXT, min_free_tokens_for_inf, max_url_scrape_len, min_tokens_think
 from prompt_formatter import Message, build_chatML_prompt
 from masker import ToolFilter, CoTFilter
 from sliding_window import prune_messages_to_fit
@@ -87,34 +87,40 @@ class ChatCompletionRequest(BaseModel): #completions
 def sse(payload: dict) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-# In server.py (replace your existing inference_chunk function)
-def inference_chunk(content=None, tool_call=None, finish_reason=None, role=None):
-    delta = {}
-    if role is not None:
-        delta["role"] = role
-    if content is not None:
-        delta["content"] = content
-    if tool_call is not None:
-        delta["tool_calls"] = [tool_call]
-        
-    return {
-        "id": f"chatcmpl-{int(time.time()*1000)}",
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": "exllamav3-local",
-        "choices": [
-            {
-                "index": 0,
-                "delta": delta,
-                "finish_reason": finish_reason,
-            }
-        ]
-    }
+
+
 
 
 #inference endopoint (only local for now see cors settings). post only
 @app.post("/v1/chat/completions")
 async def chat_completions(raw_req: Request):
+
+    request_id = f"chatcmpl-{int(time.time()*1000)}"
+    created_time = int(time.time())
+        
+    def inference_chunk(content=None, tool_call=None, finish_reason=None, role=None):
+        delta = {}
+        if role is not None:
+            delta["role"] = role
+        if content is not None:
+            delta["content"] = content
+        if tool_call is not None:
+            delta["tool_calls"] = [tool_call]
+            
+        return {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": created_time,
+            "model": "exllamav3-local",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": finish_reason,
+                }
+            ]
+        }
+    
     
     generator = state.get("generator")
     tokenizer = state.get("tokenizer")
@@ -151,7 +157,17 @@ async def chat_completions(raw_req: Request):
             tool_call_id=tool_call_id
         ))
         
-    req_max_tokens = min(data.get("max_tokens", 8192), default_max_tok_out)
+    
+    req_max_tokens = data.get("max_tokens")
+    if req_max_tokens is None:
+        req_max_tokens = default_max_tok_out
+    else:
+        req_max_tokens = max(int(req_max_tokens), min_tokens_think)
+        
+    req_max_tokens = min(req_max_tokens, default_max_tok_out)
+    
+    
+    
     req_temperature = data.get("temperature", default_temp)
     
     #get the last user's message
@@ -166,11 +182,15 @@ async def chat_completions(raw_req: Request):
             "You have access to the following tools:\n\n"
             f"<tools>\n{json.dumps(tools, ensure_ascii=False, indent=2)}\n</tools>\n\n"
             "To use a tool, you MUST respond using the following XML format:\n"
-            "<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"arg_name\": \"value\"}}\n</tool_call>\n"
-            "Do not output anything else after the tool call."
+            "<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"arg_name\": \"value\"}}\n</tool_call>\n\n"
+            "CRITICAL REQUIREMENTS:\n"
+            "1. You may ONLY use the tools explicitly listed above. Do not hallucinate or invent unlisted tools.\n"
+            "2. Do not output any conversational text before or after the tool call XML block."
         )
         safe_messages.insert(0, Message(role="system", content=tool_prompt))
-    
+        
+        
+        
     safe_messages = prune_messages_to_fit(
             safe_messages, 
             tokenizer, 
@@ -302,7 +322,8 @@ async def chat_completions(raw_req: Request):
                             
                             if not prefill_done and (chunk or result.get("eos")):
                                 time_to_prefill = time.time() - start_time
-                                print(f"{INFO} Done prefilling prompt in {time_to_prefill} seconds : (read {prompt_len} / {time_to_prefill} tok/sec)\n")
+                                read_tps = prompt_len / time_to_prefill if time_to_prefill > 0 else 0
+                                print(f"{INFO} Done prefilling prompt in {time_to_prefill:.2f} seconds : (read {read_tps:.2f} tok/sec)\n")
                                 generation_start_time = time.time()
                                 prefill_done = True
                             
@@ -338,7 +359,7 @@ async def chat_completions(raw_req: Request):
                                         
                                     if tool_out:
                                         did_tool_call = True
-                                        print(f"{WARN} Executing tool: {tool_out['function']['name']}")
+                                        print(f"\n{WARN} Executing tool: {tool_out['function']['name']}\n")
                                         yield sse(inference_chunk(tool_call=tool_out))
                             
                             if result.get("eos"):
