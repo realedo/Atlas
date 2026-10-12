@@ -13,9 +13,20 @@ from exllamav3.generator.sampler import ComboSampler
 import time
 import json
 import re
+import gc
+import datetime
+import os
 
 from model_loader import load_ai_model, clear_ai_model, state
-from config import default_max_tok_out, default_temp, MAX_CONTEXT, min_free_tokens_for_inf, max_url_scrape_len, min_tokens_think
+from config import (
+    default_max_tok_out,
+    default_temp, MAX_CONTEXT,
+    min_free_tokens_for_inf, 
+    max_url_scrape_len, 
+    min_tokens_think, 
+    max_retries_on_stream,
+    gen_timeout_seconds
+    )
 from prompt_formatter import Message, build_chatML_prompt
 from masker import ToolFilter, CoTFilter
 from sliding_window import prune_messages_to_fit
@@ -25,13 +36,39 @@ url_pattern = re.compile(r'(https?://[^\s]+)')
 
 inference_lock = threading.Lock()
 
+# Global error counters for monitoring
+OOM_COUNT = 0
+OOM_THRESHOLD = 5
+ERROR_LOG_FILE = "error_log.json"
+
 #print() colors
 INFO = "\033[92m[Info]\033[0m"
+INFOPURPLE = "\033[95m[Info]\033[0m"
 WARN = "\033[93m[Warning]\033[0m"
 ERR = "\033[91m[Error]\033[0m"
+def printPurple(string : str) -> str:
+    return "\033[94m {}\033[00m".format(string)
+def printYellow(string : str) -> str:
+    return "\033[93m {}\033[00m".format(string)
 
+def check_memory_pressure() -> bool:
 
+    if not torch.cuda.is_available():
+        return False
 
+    try:
+        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+
+        if total > 0 and (allocated / total) > 0.85:
+            print(f"{WARN} High memory pressure detected ({allocated:.2f}/{total:.2f} GB). Reducing context.")
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+            return True
+        return False
+    except Exception:
+        return False
 
 
 @asynccontextmanager
@@ -39,10 +76,11 @@ async def lifespan(app: FastAPI):
     success = load_ai_model()
     if not success:
         print(f"{ERR} Model did not load correctly")
-        
+
     try:
-        yield  
+        yield
     finally:
+        # Only clear cache on shutdown, not between requests
         clear_ai_model()
 
 
@@ -124,9 +162,15 @@ async def chat_completions(raw_req: Request):
     
     generator = state.get("generator")
     tokenizer = state.get("tokenizer")
-    
+
     if (generator is None) or (tokenizer is None):
         raise HTTPException(status_code=503, detail="Model not ready/loaded unsuccessfully.")
+
+    # Validate tokenizer has required methods
+    if not hasattr(tokenizer, 'encode') or not hasattr(tokenizer, 'decode'):
+        raise HTTPException(status_code=500, detail="Tokenizer not properly initialized")
+
+    check_memory_pressure()
 
     data = await raw_req.json()
     
@@ -185,7 +229,8 @@ async def chat_completions(raw_req: Request):
             "<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"arg_name\": \"value\"}}\n</tool_call>\n\n"
             "CRITICAL REQUIREMENTS:\n"
             "1. You may ONLY use the tools explicitly listed above. Do not hallucinate or invent unlisted tools.\n"
-            "2. Do not output any conversational text before or after the tool call XML block."
+            "2. Do not output any conversational text before or after the tool call XML block.\n"
+            "3. Your JSON tool arguments MUST be perfectly formatted. You MUST escape all double quotes (\\\"), backslashes (\\\\), and newlines (\\n) inside string arguments. Do NOT output raw unescaped newlines inside JSON strings."
         )
         safe_messages.insert(0, Message(role="system", content=tool_prompt))
         
@@ -215,7 +260,7 @@ async def chat_completions(raw_req: Request):
             }
         )
     def event_stream():
-        
+        global OOM_COUNT
         with inference_lock:
             started = False
             job = None
@@ -241,6 +286,18 @@ async def chat_completions(raw_req: Request):
                     yield sse({"error": {"message": message}})
                     return
                 
+                
+                if check_memory_pressure():
+                    yield sse({
+                        "error": {
+                            "message": "High memory usage detected. Reducing context or generation length.",
+                            "type": "resource_error"
+                        }
+                    })
+                    return
+                
+                
+                
                 requested_tokens = req_max_tokens if req_max_tokens is not None else default_max_tok_out
                 max_new_tokens = min(requested_tokens, available_tokens - 16)
                 
@@ -260,26 +317,37 @@ async def chat_completions(raw_req: Request):
                     else None
                 )
                                 
+                max_job_retries = max_retries_on_stream
+                for attempt in range(max_job_retries):
+                    try:
+                        job = Job(
+                                input_ids=input_ids,
+                                max_new_tokens=max_new_tokens,
+                                sampler=sampler,
+                                stop_conditions=stop_conditions,
+                                decode_special_tokens=False,
+                                )
+                        
+                        generator.enqueue(job)
+                        started = True
+                        break
+                    except torch.cuda.OutOfMemoryError:
+                        if attempt < max_job_retries -1:
+                            torch.cuda.empty_cache()
+                            gc.collect()
+                            time.sleep(1)
+                        else:
+                            raise
                 
                 
-                job = Job(
-                        input_ids=input_ids,
-                        max_new_tokens=max_new_tokens,
-                        sampler=sampler,
-                        stop_conditions=stop_conditions,
-                        decode_special_tokens=False,
-                    )
-
-                generator.enqueue(job)
-                started = True
                 
                 yield sse(inference_chunk(role="assistant"))
                 
                 print(
-                        f"\n{INFO} Starting EXL3 inference "
-                        f"(prompt: {prompt_len}/{MAX_CONTEXT} tokens, "
+                        f"\n{INFOPURPLE} Starting EXL3 inference "
+                        f"(prompt: {printPurple(prompt_len)}/{printYellow(MAX_CONTEXT)} tokens, "
                         f"max output: {max_new_tokens}, "
-                        f"temperature: {req_temperature})\nStarting prefill...\n"
+                        f"temperature: {printYellow(req_temperature)})\nStarting prefill...\n"
                     )
 
                 start_time = time.time()
@@ -298,6 +366,14 @@ async def chat_completions(raw_req: Request):
                 full_model_response = ""
 
                 while generator.num_remaining_jobs():
+                    
+                        if time.time() - start_time > gen_timeout_seconds:
+                            print(f"{WARN} Generation timed out after 300s.")
+                            yield sse(inference_chunk(content="\n\n[System: Generation timed out.]", finish_reason="timeout"))
+                            generator.cancel(job)
+                            break
+                        
+                        
                         results = generator.iterate()
 
                         for result in results:
@@ -359,7 +435,8 @@ async def chat_completions(raw_req: Request):
                                         
                                     if tool_out:
                                         did_tool_call = True
-                                        print(f"\n{WARN} Executing tool: {tool_out['function']['name']}\n")
+                                        timestmp_used_tool = datetime.datetime.now().strftime('%H:%M')
+                                        print(f"\n{WARN} [{timestmp_used_tool}] Executing tool: {printYellow(tool_out['function']['name'])}\n")
                                         yield sse(inference_chunk(tool_call=tool_out))
                             
                             if result.get("eos"):
@@ -398,7 +475,7 @@ async def chat_completions(raw_req: Request):
                 
                 if complete_output:
                     if is_length_truncated and cot_masker.in_think:
-                        complete_output = f"\n\n[System: Generation truncated by max_tokens limit while thinking.]\n"
+                        complete_output = f"\n\n[System] : Generation truncated by max_tokens limit while thinking.\n"
                     full_model_response += complete_output
                     yield sse(inference_chunk(content=complete_output))
                     
@@ -407,7 +484,7 @@ async def chat_completions(raw_req: Request):
                 tps = total_generated / elapsed_time if elapsed_time > 0 else 0
 
                 print(
-                        f"\n{INFO} Generation finished: {total_generated} tokens, "
+                        f"\n{INFOPURPLE} Generation finished: {printPurple(total_generated)} tokens, "
                         f"{tps:.2f} tokens/s, {elapsed_time:.2f}s"
                     )
                 
@@ -420,15 +497,32 @@ async def chat_completions(raw_req: Request):
             except GeneratorExit:
                 if started and job is not None:
                     try:
-                        if generator.num_remaining_jobs():
+                        if hasattr(generator, 'cancel'):
                             generator.cancel(job)
+                        # Wait for job to finish cancelling safely
+                        time.sleep(0.5)
                     except Exception:
                         pass
+                
+                # Clean up resources
+                if 'job' in locals():
+                    del job
+                torch.cuda.empty_cache()
+                gc.collect()
                 raise
             #OoM
             except torch.cuda.OutOfMemoryError:
+                
+                OOM_COUNT += 1
+
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                    gc.collect()
+
+                print(f"{ERR} OOM error #{OOM_COUNT}. Attempting recovery...")
+
+                if OOM_COUNT >= OOM_THRESHOLD:
+                    print(f"{ERR} OOM threshold reached ({OOM_COUNT}). Frequent OOM errors detected.")
 
                 yield sse({
                     "error": {
@@ -437,18 +531,56 @@ async def chat_completions(raw_req: Request):
                             "or other VRAM usage."
                         ),
                         "type": "server_error",
-                    }
+                        "retry_after": 10 if OOM_COUNT < OOM_THRESHOLD else 60
+                    },
                 })
                 yield "data: [DONE]\n\n"
+
+                # Reset counter after recovery attempt
+                OOM_COUNT = 0
                 
             #general exeption
             except Exception as exc:
+                
+                # Track OOM separately from other errors
+                if "out of memory" in str(exc).lower():
+                    OOM_COUNT += 1
+                    if OOM_COUNT >= OOM_THRESHOLD:
+                        print(f"{ERR} Frequent OOM errors detected ({OOM_COUNT}).")
+                else:
+                    OOM_COUNT = 0  # Reset on non-OOM errors
+
+                # Log error details
+                error_log = {
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "request_id": request_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "oom_count": OOM_COUNT if "out of memory" not in str(exc).lower() else OOM_COUNT + 1
+                }
+
+                # Try to log to file
+                try:
+                    import json
+                    if not os.path.exists(ERROR_LOG_FILE):
+                        with open(ERROR_LOG_FILE, 'w') as f:
+                            json.dump([], f)
+
+                    with open(ERROR_LOG_FILE, 'r') as f:
+                        logs = json.load(f)
+                    logs.append(error_log)
+                    with open(ERROR_LOG_FILE, 'w') as f:
+                        json.dump(logs, f)
+                except Exception as log_exc:
+                    print(f"{WARN} Could not write error log: {log_exc}")
+
                 print(f"{ERR} Inference failed: {exc}")
                 yield sse({
                     "error": {
                         "message": f"Inference failed: {str(exc)}",
                         "type": "server_error",
-                    }
+                        "details": str(exc)[:500]  # Truncate long errors
+                    },
                 })
                 yield "data: [DONE]\n\n"
 
