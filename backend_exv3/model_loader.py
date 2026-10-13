@@ -7,6 +7,7 @@ from config import MODEL_DIR, MAX_CONTEXT, chache_quantization, kv_cache_bits
 
 #print() colors
 INFO = "\033[92m[Info]\033[0m"
+WARN = "\033[93m[Warning]\033[0m"
 ERR = "\033[91m[Error]\033[0m"
 
 state = {} # dynamic global dict. (persist on verious HTTPS req.)
@@ -96,3 +97,24 @@ def clear_ai_model():
         torch.cuda.empty_cache()
 
     print("Model resources released.")
+
+
+
+def check_memory_pressure() -> bool:
+
+    if not torch.cuda.is_available():
+        return False
+
+    try:
+        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
+        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+
+        if total > 0 and (allocated / total) > 0.85:
+            print(f"{WARN} High memory pressure detected ({allocated:.2f}/{total:.2f} GB). Reducing context.")
+            torch.cuda.empty_cache()
+            import gc
+            gc.collect()
+            return True
+        return False
+    except Exception:
+        return False

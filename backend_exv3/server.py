@@ -17,7 +17,8 @@ import gc
 import datetime
 import os
 
-from model_loader import load_ai_model, clear_ai_model, state
+from model_loader import load_ai_model, clear_ai_model, check_memory_pressure, state
+from helpers import inference_chunk, declare_tools
 from config import (
     default_max_tok_out,
     default_temp, MAX_CONTEXT,
@@ -51,24 +52,6 @@ def printPurple(string : str) -> str:
 def printYellow(string : str) -> str:
     return "\033[93m {}\033[00m".format(string)
 
-def check_memory_pressure() -> bool:
-
-    if not torch.cuda.is_available():
-        return False
-
-    try:
-        allocated = torch.cuda.memory_allocated() / 1024**3  # GB
-        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-
-        if total > 0 and (allocated / total) > 0.85:
-            print(f"{WARN} High memory pressure detected ({allocated:.2f}/{total:.2f} GB). Reducing context.")
-            torch.cuda.empty_cache()
-            import gc
-            gc.collect()
-            return True
-        return False
-    except Exception:
-        return False
 
 
 @asynccontextmanager
@@ -136,28 +119,7 @@ async def chat_completions(raw_req: Request):
     request_id = f"chatcmpl-{int(time.time()*1000)}"
     created_time = int(time.time())
         
-    def inference_chunk(content=None, tool_call=None, finish_reason=None, role=None):
-        delta = {}
-        if role is not None:
-            delta["role"] = role
-        if content is not None:
-            delta["content"] = content
-        if tool_call is not None:
-            delta["tool_calls"] = [tool_call]
-            
-        return {
-            "id": request_id,
-            "object": "chat.completion.chunk",
-            "created": created_time,
-            "model": "exllamav3-local",
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": delta,
-                    "finish_reason": finish_reason,
-                }
-            ]
-        }
+    
     
     
     generator = state.get("generator")
@@ -219,22 +181,7 @@ async def chat_completions(raw_req: Request):
     
     add_web_context(last_user_message, inference_lock, generator, tokenizer, safe_messages)
     
-    
-    tools = data.get("tools", [])
-    if tools:
-        tool_prompt = (
-            "You have access to the following tools:\n\n"
-            f"<tools>\n{json.dumps(tools, ensure_ascii=False, indent=2)}\n</tools>\n\n"
-            "To use a tool, you MUST respond using the following XML format:\n"
-            "<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"arg_name\": \"value\"}}\n</tool_call>\n\n"
-            "CRITICAL REQUIREMENTS:\n"
-            "1. You may ONLY use the tools explicitly listed above. Do not hallucinate or invent unlisted tools.\n"
-            "2. Do not output any conversational text before or after the tool call XML block.\n"
-            "3. Your JSON tool arguments MUST be perfectly formatted. You MUST escape all double quotes (\\\"), backslashes (\\\\), and newlines (\\n) inside string arguments. Do NOT output raw unescaped newlines inside JSON strings."
-        )
-        safe_messages.insert(0, Message(role="system", content=tool_prompt))
-        
-        
+    declare_tools(data, safe_messages)
         
     safe_messages = prune_messages_to_fit(
             safe_messages, 
@@ -285,8 +232,7 @@ async def chat_completions(raw_req: Request):
                         )
                     yield sse({"error": {"message": message}})
                     return
-                
-                
+                             
                 if check_memory_pressure():
                     yield sse({
                         "error": {
@@ -295,9 +241,7 @@ async def chat_completions(raw_req: Request):
                         }
                     })
                     return
-                
-                
-                
+                              
                 requested_tokens = req_max_tokens if req_max_tokens is not None else default_max_tok_out
                 max_new_tokens = min(requested_tokens, available_tokens - 16)
                 
@@ -341,7 +285,7 @@ async def chat_completions(raw_req: Request):
                 
                 
                 
-                yield sse(inference_chunk(role="assistant"))
+                yield sse(inference_chunk(request_id, created_time, role="assistant"))
                 
                 print(
                         f"\n{INFOPURPLE} Starting EXL3 inference "
@@ -361,6 +305,7 @@ async def chat_completions(raw_req: Request):
                 
                 cot_masker = CoTFilter()
                 cot_tokens=0
+                prefill_tokens = 0
                 tool_masker = ToolFilter()
                 did_tool_call = False
                 full_model_response = ""
@@ -368,8 +313,8 @@ async def chat_completions(raw_req: Request):
                 while generator.num_remaining_jobs():
                     
                         if time.time() - start_time > gen_timeout_seconds:
-                            print(f"{WARN} Generation timed out after 300s.")
-                            yield sse(inference_chunk(content="\n\n[System: Generation timed out.]", finish_reason="timeout"))
+                            print(f"{WARN} Generation timed out after {gen_timeout_seconds}.")
+                            yield sse(inference_chunk(request_id, created_time, content="\n\n[System: Generation timed out.]", finish_reason="timeout"))
                             generator.cancel(job)
                             break
                         
@@ -384,6 +329,16 @@ async def chat_completions(raw_req: Request):
                             if result.get("stage") == "error":
                                 raise result["error"]
 
+                            if result.get("stage") == "prefill":
+                                
+                                chunk_size = result.get("chunk_tokens", result.get("tokens", 2048))
+                                prefill_tokens += chunk_size
+                                
+                                pct = min(100.0, (prefill_tokens / max(1, prompt_len)) * 100)
+                                bar = printPurple("█" * int(pct / 5) + "░" * (20 - int(pct / 5)))
+                                print(f"\r{INFO} Prefilling: [{bar}] {pct:.1f}%", end="", flush=True)
+                                continue
+                            
                             if result.get("stage") != "streaming":
                                 continue
                             if result.get("job") is job and result.get("eos"):
@@ -399,7 +354,7 @@ async def chat_completions(raw_req: Request):
                             if not prefill_done and (chunk or result.get("eos")):
                                 time_to_prefill = time.time() - start_time
                                 read_tps = prompt_len / time_to_prefill if time_to_prefill > 0 else 0
-                                print(f"{INFO} Done prefilling prompt in {time_to_prefill:.2f} seconds : (read {read_tps:.2f} tok/sec)\n")
+                                print(f"\n{INFO} Done prefilling prompt in {time_to_prefill:.2f} seconds : (read {read_tps:.2f} tok/sec)\n")
                                 generation_start_time = time.time()
                                 prefill_done = True
                             
@@ -423,7 +378,8 @@ async def chat_completions(raw_req: Request):
 
                                 #Cot finished
                                 if was_thinking and not cot_masker.in_think:
-                                    print(f"\n{INFO} CoT phase done. used : {cot_tokens} to think\n")
+                                    
+                                    print(f"\n{INFO} CoT phase done. used : {printPurple(str(cot_tokens))} to think\n")
 
                                 #send output
                                 if filtered_output:
@@ -431,13 +387,13 @@ async def chat_completions(raw_req: Request):
                                     
                                     if text_out:
                                         full_model_response += text_out
-                                        yield sse(inference_chunk(content=text_out))
+                                        yield sse(inference_chunk(request_id, created_time, content=text_out))
                                         
                                     if tool_out:
                                         did_tool_call = True
                                         timestmp_used_tool = datetime.datetime.now().strftime('%H:%M')
                                         print(f"\n{WARN} [{timestmp_used_tool}] Executing tool: {printYellow(tool_out['function']['name'])}\n")
-                                        yield sse(inference_chunk(tool_call=tool_out))
+                                        yield sse(inference_chunk(request_id, created_time, tool_call=tool_out))
                             
                             if result.get("eos"):
                                 reason = result.get("eos_reason", "stop")
@@ -477,9 +433,9 @@ async def chat_completions(raw_req: Request):
                     if is_length_truncated and cot_masker.in_think:
                         complete_output = f"\n\n[System] : Generation truncated by max_tokens limit while thinking.\n"
                     full_model_response += complete_output
-                    yield sse(inference_chunk(content=complete_output))
+                    yield sse(inference_chunk(request_id, created_time, content=complete_output))
                     
-                elapsed_time = time.time() - start_time
+                elapsed_time = time.time() - generation_start_time
                 total_generated = getattr(job, "new_tokens", generated_tokens)
                 tps = total_generated / elapsed_time if elapsed_time > 0 else 0
 
@@ -488,7 +444,7 @@ async def chat_completions(raw_req: Request):
                         f"{tps:.2f} tokens/s, {elapsed_time:.2f}s"
                     )
                 
-                yield sse(inference_chunk(finish_reason=finish_reason))
+                yield sse(inference_chunk(request_id, created_time, finish_reason=finish_reason))
                 
                 yield "data: [DONE]\n\n"
 
@@ -585,14 +541,88 @@ async def chat_completions(raw_req: Request):
                 yield "data: [DONE]\n\n"
 
 
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    # Check if the client wants a stream
+    is_stream = data.get("stream", False)
+
+    if is_stream:
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    else:
+        # Client requested a non-streaming response. Consume the generator and build a static JSON.
+        full_content = ""
+        finish_reason = "stop"
+        tool_calls = []
+
+        for chunk_str in event_stream():
+            if chunk_str.startswith("data: [DONE]"):
+                continue
+            if chunk_str.startswith("data: "):
+                try:
+                    payload = json.loads(chunk_str[6:])
+                    
+                    if "error" in payload:
+                        return JSONResponse(status_code=500, content=payload)
+                        
+                    delta = payload["choices"][0]["delta"]
+
+                    if "content" in delta and delta["content"]:
+                        full_content += delta["content"]
+                    if "tool_calls" in delta and delta["tool_calls"]:
+                        tool_calls.extend(delta["tool_calls"])
+                    if payload["choices"][0].get("finish_reason"):
+                        finish_reason = payload["choices"][0]["finish_reason"]
+                except Exception:
+                    pass
+
+        # Build standard OpenAI non-streaming response
+        message = {"role": "assistant", "content": full_content}
+        if tool_calls:
+            formatted_tools = []
+            for i, tc in enumerate(tool_calls):
+                # Handle cases where ToolFilter yields different dict structures
+                func_name = tc.get("name", tc.get("function", {}).get("name", "unknown"))
+                args = tc.get("arguments", tc.get("function", {}).get("arguments", {}))
+                
+                # OpenAI STRICTLY requires arguments to be a JSON string, not a dict
+                if isinstance(args, dict):
+                    args = json.dumps(args, ensure_ascii=False)
+                    
+                formatted_tools.append({
+                    "id": f"call_{int(time.time())}_{i}",
+                    "type": "function",
+                    "function": {
+                        "name": func_name,
+                        "arguments": args
+                    }
+                })
+            message["tool_calls"] = formatted_tools
+
+        return JSONResponse(
+            content={
+                "id": request_id,
+                "object": "chat.completion",
+                "created": created_time,
+                "model": "exllamav3-local",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": finish_reason
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": prompt_len,
+                    "completion_tokens": 0, 
+                    "total_tokens": prompt_len
+                }
+            }
+        )
 
 @app.get("/health")
 def health():

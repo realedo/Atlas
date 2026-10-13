@@ -22,6 +22,7 @@ model_list:
       model: "custom_openai/Atlas"
       api_base: "http://127.0.0.1:8000/v1"
       api_key: "sk-chiave-finta-locale"
+      request_timeout: 600
 
 general_settings:
   dangerously_permit_weak_or_unset_master_key: true
